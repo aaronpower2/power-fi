@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "allocation_targets_strategy_asset_uidx" ON "allocation_targets" USING btree ("strategy_id","asset_id");

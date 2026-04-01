@@ -1,0 +1,62 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1774975963232,
+      "tag": "0000_init",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1774976604842,
+      "tag": "0001_allocation_targets_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1774976700000,
+      "tag": "0002_goal_lifestyle_lines",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1774980000000,
+      "tag": "0003_currency_and_fx",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1774981000000,
+      "tag": "0004_income_line_recurring",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1774982000000,
+      "tag": "0005_income_line_recurring_currency",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1774983000000,
+      "tag": "0006_income_line_recurring_anchor",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1774984000000,
+      "tag": "0007_budget_plan_snapshots_expense_recurring",
+      "breakpoints": true
+    }
+  ]
+}
