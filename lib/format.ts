@@ -7,6 +7,7 @@ function getFormatter(currencyCode: string, maximumFractionDigits: number): Intl
     f = new Intl.NumberFormat("en-US", {
       style: "currency",
       currency: currencyCode,
+      minimumFractionDigits: 0,
       maximumFractionDigits,
     })
     formatters.set(key, f)
@@ -35,5 +36,5 @@ export function formatMonths(value: number | null | undefined): string {
 
 export function formatPercent(rate: number | null | undefined): string {
   if (rate == null || Number.isNaN(rate)) return "—"
-  return `${(rate * 100).toFixed(2)}%`
+  return `${Math.round(rate * 100)}%`
 }

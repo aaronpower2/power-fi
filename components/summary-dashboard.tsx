@@ -26,17 +26,6 @@ export function SummaryDashboard({ data }: { data: SummaryData }) {
           {data.fxWarning}
         </p>
       ) : null}
-      {data.fxAsOfDate ? (
-        <div className="text-muted-foreground flex flex-wrap items-center gap-1.5 text-sm">
-          <span className="text-foreground font-medium">{ccy}</span>
-          <span>·</span>
-          <span>ECB {data.fxAsOfDate}</span>
-          <InfoTooltip>
-            Amounts use your goal currency, converted from asset and flow currencies with ECB rates as of
-            this date.
-          </InfoTooltip>
-        </div>
-      ) : null}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
           title="Goal status"
@@ -44,14 +33,14 @@ export function SummaryDashboard({ data }: { data: SummaryData }) {
           value={data.goalFundable === null ? "—" : data.goalFundable ? "On track" : "Gap"}
           detail={
             data.goalFundable === false && data.shortfall != null
-              ? `${formatCurrency(data.shortfall, ccy)} below target`
+              ? `${formatCurrency(data.shortfall, ccy, { maximumFractionDigits: 0 })} below target`
               : undefined
           }
         />
         <MetricCard
           title="Net worth"
-          info="Total portfolio value in goal currency (converted per asset currency)."
-          value={formatCurrency(data.netWorth, ccy)}
+          info="Gross asset balances minus liability principal, in goal currency (FX per line). Cash debt payments stay in Budget."
+          value={formatCurrency(data.netWorth, ccy, { maximumFractionDigits: 0 })}
         />
         <MetricCard
           title="Months to FI"
@@ -61,7 +50,9 @@ export function SummaryDashboard({ data }: { data: SummaryData }) {
         <MetricCard
           title="Required portfolio"
           info="Portfolio size implied by lifestyle funding and your withdrawal rate."
-          value={formatCurrency(data.requiredPrincipal ?? null, ccy)}
+          value={formatCurrency(data.requiredPrincipal ?? null, ccy, {
+            maximumFractionDigits: 0,
+          })}
         />
       </div>
       <Card>
@@ -70,8 +61,8 @@ export function SummaryDashboard({ data }: { data: SummaryData }) {
             title={<CardTitle>Portfolio vs projection</CardTitle>}
             info={
               <>
-                Projected growth using assumed returns, capital maturities, and monthly contributions. Withdrawal
-                target: {formatPercent(data.assumedWithdrawalRate)}.
+                Gross asset trajectory (returns, maturities, contributions), then liability principal is subtracted
+                as a flat total (v1). Withdrawal target: {formatPercent(data.assumedWithdrawalRate)}.
               </>
             }
           />

@@ -8,6 +8,8 @@ export type GoalWithLifestyle = {
   lifestyleLines: (typeof goalLifestyleLines.$inferSelect)[]
 }
 
+export { formatGoalDisplayName, formatGoalListLabel } from "@/lib/goals/labels"
+
 export async function listGoalsWithLifestyle(): Promise<GoalWithLifestyle[]> {
   const db = getDb()
   if (!db) return []

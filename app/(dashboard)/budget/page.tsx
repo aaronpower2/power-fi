@@ -20,7 +20,7 @@ export default async function BudgetPage({
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-8">
       <PageHeader
         title="Budget"
-        description="Planned amounts come from recurring lines (or locked past-month snapshots). Actuals come from records. Summary cards use AED, NZD, or AUD (toggle in the toolbar). Investable is actual income minus actual expenses."
+        description="Income planned comes from recurring income lines; expense planned from recurring budgets on each category (or locked past-month snapshots). Actuals come from line-level records and imports. Summary cards use AED, NZD, or AUD (toggle in the toolbar). Investable is actual income minus actual expenses."
         controls={<BudgetPageControls data={data} />}
       />
       <BudgetManager data={data} />

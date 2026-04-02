@@ -43,7 +43,7 @@ export function SummaryChart({ series, requiredPrincipal, currencyCode }: Props)
             tickLine={false}
             axisLine={false}
             tickFormatter={(v) =>
-              v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : `${(v / 1000).toFixed(0)}k`
+              v >= 1_000_000 ? `${Math.round(v / 1_000_000)}M` : `${Math.round(v / 1000)}k`
             }
           />
           <Tooltip
@@ -56,6 +56,7 @@ export function SummaryChart({ series, requiredPrincipal, currencyCode }: Props)
               formatCurrency(
                 typeof value === "number" ? value : Number(value),
                 currencyCode,
+                { maximumFractionDigits: 0 },
               ),
               "Projected",
             ]}

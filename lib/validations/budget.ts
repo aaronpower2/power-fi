@@ -45,7 +45,7 @@ export const incomeLineSchema = incomeLineRefined.transform((data) => ({
   isRecurring: data.isRecurring,
   frequency: data.isRecurring ? data.frequency! : null,
   recurringAmount: data.isRecurring ? data.recurringAmount! : null,
-  recurringCurrency: data.isRecurring ? (data.recurringCurrency ?? "USD") : null,
+  recurringCurrency: data.isRecurring ? (data.recurringCurrency ?? "AED") : null,
   recurringAnchorDate: data.isRecurring ? (data.recurringAnchorDate ?? null) : null,
 }))
 
@@ -78,7 +78,7 @@ export const updateIncomeLineSchema = updateIncomeLineInput.transform((data) => 
   isRecurring: data.isRecurring,
   frequency: data.isRecurring ? data.frequency! : null,
   recurringAmount: data.isRecurring ? data.recurringAmount! : null,
-  recurringCurrency: data.isRecurring ? (data.recurringCurrency ?? "USD") : null,
+  recurringCurrency: data.isRecurring ? (data.recurringCurrency ?? "AED") : null,
   recurringAnchorDate: data.isRecurring ? (data.recurringAnchorDate ?? null) : null,
 }))
 
@@ -93,31 +93,21 @@ export const updateIncomeRecordSchema = incomeRecordSchema.extend({
   id: z.string().uuid(),
 })
 
-export const expenseCategorySchema = z.object({
+const expenseCategoryFields = z.object({
   name: z.string().min(1).max(256),
   sortOrder: z.coerce.number().int().default(0),
-})
-
-export const updateExpenseCategorySchema = expenseCategorySchema.extend({
-  id: z.string().uuid(),
-})
-
-const expenseLineFields = z.object({
-  categoryId: z.string().uuid(),
-  name: z.string().min(1).max(256),
   isRecurring: z.boolean().default(false),
   frequency: budgetRecurringFrequencySchema.optional().nullable(),
   recurringAmount: z.coerce.number().optional().nullable(),
   recurringCurrency: supportedCurrencySchema.optional().nullable(),
-  recurringAnchorDate: dateStr.optional().nullable(),
 })
 
-const expenseLineRefined = expenseLineFields.superRefine((data, ctx) => {
+const expenseCategoryRefined = expenseCategoryFields.superRefine((data, ctx) => {
   if (data.isRecurring) {
     if (data.frequency == null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Choose a frequency for recurring expense",
+        message: "Choose a frequency for category budget",
         path: ["frequency"],
       })
     }
@@ -132,25 +122,24 @@ const expenseLineRefined = expenseLineFields.superRefine((data, ctx) => {
   }
 })
 
-export const expenseLineSchema = expenseLineRefined.transform((data) => ({
-  categoryId: data.categoryId,
+export const expenseCategorySchema = expenseCategoryRefined.transform((data) => ({
   name: data.name,
+  sortOrder: data.sortOrder,
   isRecurring: data.isRecurring,
   frequency: data.isRecurring ? data.frequency! : null,
   recurringAmount: data.isRecurring ? data.recurringAmount! : null,
-  recurringCurrency: data.isRecurring ? (data.recurringCurrency ?? "USD") : null,
-  recurringAnchorDate: data.isRecurring ? (data.recurringAnchorDate ?? null) : null,
+  recurringCurrency: data.isRecurring ? (data.recurringCurrency ?? "AED") : null,
 }))
 
-const updateExpenseLineInput = z
+const updateExpenseCategoryInput = z
   .object({ id: z.string().uuid() })
-  .merge(expenseLineFields)
+  .merge(expenseCategoryFields)
   .superRefine((data, ctx) => {
     if (data.isRecurring) {
       if (data.frequency == null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "Choose a frequency for recurring expense",
+          message: "Choose a frequency for category budget",
           path: ["frequency"],
         })
       }
@@ -165,16 +154,26 @@ const updateExpenseLineInput = z
     }
   })
 
-export const updateExpenseLineSchema = updateExpenseLineInput.transform((data) => ({
+export const updateExpenseCategorySchema = updateExpenseCategoryInput.transform((data) => ({
   id: data.id,
-  categoryId: data.categoryId,
   name: data.name,
+  sortOrder: data.sortOrder,
   isRecurring: data.isRecurring,
   frequency: data.isRecurring ? data.frequency! : null,
   recurringAmount: data.isRecurring ? data.recurringAmount! : null,
-  recurringCurrency: data.isRecurring ? (data.recurringCurrency ?? "USD") : null,
-  recurringAnchorDate: data.isRecurring ? (data.recurringAnchorDate ?? null) : null,
+  recurringCurrency: data.isRecurring ? (data.recurringCurrency ?? "AED") : null,
 }))
+
+const expenseLineFields = z.object({
+  categoryId: z.string().uuid(),
+  name: z.string().min(1).max(256),
+})
+
+export const expenseLineSchema = expenseLineFields
+
+export const updateExpenseLineSchema = expenseLineFields.extend({
+  id: z.string().uuid(),
+})
 
 export const expenseRecordSchema = z.object({
   expenseLineId: z.string().uuid(),

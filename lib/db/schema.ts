@@ -4,9 +4,11 @@ import {
   check,
   date,
   integer,
+  jsonb,
   numeric,
   pgEnum,
   pgTable,
+  text,
   timestamp,
   uniqueIndex,
   uuid,
@@ -17,6 +19,8 @@ export const growthTypeEnum = pgEnum("growth_type", ["compound", "capital"])
 
 export const goals = pgTable("goals", {
   id: uuid("id").primaryKey().defaultRandom(),
+  /** User-defined label; lists fall back to FI date · currency when unset. */
+  name: varchar("name", { length: 256 }),
   fiDate: date("fi_date").notNull(),
   withdrawalRate: numeric("withdrawal_rate", { precision: 10, scale: 6 }).notNull(),
   monthlyFundingRequirement: numeric("monthly_funding_requirement", {
@@ -52,6 +56,11 @@ export const assets = pgTable("assets", {
     .notNull()
     .default("0"),
   currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+  /** Optional UI metadata (e.g. linkToManage for external platforms). */
+  meta: jsonb("meta")
+    .$type<Record<string, unknown>>()
+    .notNull()
+    .default(sql`'{}'::jsonb`),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 })
@@ -104,6 +113,34 @@ export const allocationTargets = pgTable(
   ],
 )
 
+export const liabilities = pgTable(
+  "liabilities",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: varchar("name", { length: 256 }).notNull(),
+    liabilityType: varchar("liability_type", { length: 128 }),
+    currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+    /** Principal owed (positive number). */
+    currentBalance: numeric("current_balance", { precision: 16, scale: 2 })
+      .notNull()
+      .default("0"),
+    securedByAssetId: uuid("secured_by_asset_id").references(() => assets.id, {
+      onDelete: "set null",
+    }),
+    meta: jsonb("meta")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("liabilities_secured_asset_uidx")
+      .on(t.securedByAssetId)
+      .where(sql`${t.securedByAssetId} IS NOT NULL`),
+  ],
+)
+
 export const incomeLines = pgTable("income_lines", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: varchar("name", { length: 256 }).notNull(),
@@ -136,6 +173,11 @@ export const expenseCategories = pgTable("expense_categories", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: varchar("name", { length: 256 }).notNull(),
   sortOrder: integer("sort_order").notNull().default(0),
+  /** Month-level planned envelope (smoothed monthly equivalent; no per-day anchor). */
+  isRecurring: boolean("is_recurring").notNull().default(false),
+  frequency: varchar("frequency", { length: 32 }),
+  recurringAmount: numeric("recurring_amount", { precision: 16, scale: 2 }),
+  recurringCurrency: varchar("recurring_currency", { length: 3 }).notNull().default("USD"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 })
 
@@ -145,25 +187,23 @@ export const expenseLines = pgTable("expense_lines", {
     .notNull()
     .references(() => expenseCategories.id, { onDelete: "cascade" }),
   name: varchar("name", { length: 256 }).notNull(),
-  isRecurring: boolean("is_recurring").notNull().default(false),
-  frequency: varchar("frequency", { length: 32 }),
-  recurringAmount: numeric("recurring_amount", { precision: 16, scale: 2 }),
-  recurringCurrency: varchar("recurring_currency", { length: 3 }).notNull().default("USD"),
-  recurringAnchorDate: date("recurring_anchor_date"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 })
 
-/** Frozen planned monthly totals per line for closed months (finalize action). */
+/** Frozen planned monthly totals for closed months (finalize action). */
 export const budgetMonthPlanLines = pgTable(
   "budget_month_plan_lines",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     periodMonth: date("period_month").notNull(),
-    lineKind: varchar("line_kind", { length: 16 }).notNull(),
+    lineKind: varchar("line_kind", { length: 24 }).notNull(),
     incomeLineId: uuid("income_line_id").references(() => incomeLines.id, {
       onDelete: "cascade",
     }),
     expenseLineId: uuid("expense_line_id").references(() => expenseLines.id, {
+      onDelete: "cascade",
+    }),
+    expenseCategoryId: uuid("expense_category_id").references(() => expenseCategories.id, {
       onDelete: "cascade",
     }),
     currency: varchar("currency", { length: 3 }).notNull(),
@@ -172,10 +212,11 @@ export const budgetMonthPlanLines = pgTable(
   },
   (t) => [
     check(
-      "budget_month_plan_lines_one_line",
+      "budget_month_plan_lines_kind_check",
       sql`(
-        (${t.incomeLineId} IS NOT NULL AND ${t.expenseLineId} IS NULL AND ${t.lineKind} = 'income')
-        OR (${t.expenseLineId} IS NOT NULL AND ${t.incomeLineId} IS NULL AND ${t.lineKind} = 'expense')
+        (${t.incomeLineId} IS NOT NULL AND ${t.expenseLineId} IS NULL AND ${t.expenseCategoryId} IS NULL AND ${t.lineKind} = 'income')
+        OR (${t.expenseLineId} IS NOT NULL AND ${t.incomeLineId} IS NULL AND ${t.expenseCategoryId} IS NULL AND ${t.lineKind} = 'expense')
+        OR (${t.expenseCategoryId} IS NOT NULL AND ${t.incomeLineId} IS NULL AND ${t.expenseLineId} IS NULL AND ${t.lineKind} = 'expense_category')
       )`,
     ),
     uniqueIndex("budget_month_plan_income_uidx")
@@ -184,6 +225,9 @@ export const budgetMonthPlanLines = pgTable(
     uniqueIndex("budget_month_plan_expense_uidx")
       .on(t.periodMonth, t.expenseLineId)
       .where(sql`${t.expenseLineId} IS NOT NULL`),
+    uniqueIndex("budget_month_plan_expense_category_uidx")
+      .on(t.periodMonth, t.expenseCategoryId)
+      .where(sql`${t.expenseCategoryId} IS NOT NULL`),
   ],
 )
 
@@ -197,6 +241,121 @@ export const expenseRecords = pgTable("expense_records", {
   occurredOn: date("occurred_on").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 })
+
+/** Bulk bank/card import: one user upload session. */
+export const transactionImportBatches = pgTable("transaction_import_batches", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  label: varchar("label", { length: 256 }),
+  status: varchar("status", { length: 32 }).notNull().default("uploaded"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+})
+
+/** One file within a batch; binary stored on disk at `storagePath`. */
+export const transactionImportFiles = pgTable("transaction_import_files", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  batchId: uuid("batch_id")
+    .notNull()
+    .references(() => transactionImportBatches.id, { onDelete: "cascade" }),
+  originalName: varchar("original_name", { length: 512 }).notNull(),
+  mimeType: varchar("mime_type", { length: 128 }).notNull(),
+  byteSize: integer("byte_size").notNull(),
+  storagePath: varchar("storage_path", { length: 1024 }).notNull(),
+  parserKind: varchar("parser_kind", { length: 32 }).notNull().default("unknown"),
+  parseStatus: varchar("parse_status", { length: 32 }).notNull().default("pending"),
+  parseError: text("parse_error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+})
+
+/** Parsed row from a file; match fields filled by AI or user. */
+export const importedTransactions = pgTable(
+  "imported_transactions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => transactionImportBatches.id, { onDelete: "cascade" }),
+    fileId: uuid("file_id")
+      .notNull()
+      .references(() => transactionImportFiles.id, { onDelete: "cascade" }),
+    occurredOn: date("occurred_on").notNull(),
+    /** Signed: negative often means inflow on card statements. */
+    amount: numeric("amount", { precision: 16, scale: 2 }).notNull(),
+    currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+    description: text("description").notNull(),
+    rawPayload: jsonb("raw_payload")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    dedupeHash: varchar("dedupe_hash", { length: 64 }).notNull(),
+    parserRowIndex: integer("parser_row_index").notNull().default(0),
+    direction: varchar("direction", { length: 16 }),
+    matchStatus: varchar("match_status", { length: 32 }).notNull().default("pending"),
+    suggestedExpenseLineId: uuid("suggested_expense_line_id").references(() => expenseLines.id, {
+      onDelete: "set null",
+    }),
+    suggestedIncomeLineId: uuid("suggested_income_line_id").references(() => incomeLines.id, {
+      onDelete: "set null",
+    }),
+    suggestedCategoryName: varchar("suggested_category_name", { length: 256 }),
+    suggestedLineName: varchar("suggested_line_name", { length: 256 }),
+    suggestedUseExistingCategoryId: uuid("suggested_use_existing_category_id").references(
+      () => expenseCategories.id,
+      { onDelete: "set null" },
+    ),
+    modelConfidence: varchar("model_confidence", { length: 32 }),
+    modelNotes: text("model_notes"),
+    postedRecordKind: varchar("posted_record_kind", { length: 16 }),
+    postedRecordId: uuid("posted_record_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [uniqueIndex("imported_txn_batch_dedupe_uidx").on(t.batchId, t.dedupeHash)],
+)
+
+/**
+ * Durable month-scoped view of transactions for the budget month (imports + optional manual).
+ * Survives import batch deletion via ON DELETE SET NULL on imported_transaction_id.
+ */
+export const budgetMonthTransactions = pgTable(
+  "budget_month_transactions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    periodMonth: date("period_month").notNull(),
+    occurredOn: date("occurred_on").notNull(),
+    amount: numeric("amount", { precision: 16, scale: 2 }).notNull(),
+    currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+    description: text("description").notNull(),
+    direction: varchar("direction", { length: 16 }),
+    source: varchar("source", { length: 32 }).notNull().default("import"),
+    importedTransactionId: uuid("imported_transaction_id").references(
+      () => importedTransactions.id,
+      { onDelete: "set null" },
+    ),
+    suggestedExpenseLineId: uuid("suggested_expense_line_id").references(() => expenseLines.id, {
+      onDelete: "set null",
+    }),
+    suggestedIncomeLineId: uuid("suggested_income_line_id").references(() => incomeLines.id, {
+      onDelete: "set null",
+    }),
+    postedExpenseRecordId: uuid("posted_expense_record_id").references(() => expenseRecords.id, {
+      onDelete: "set null",
+    }),
+    postedIncomeRecordId: uuid("posted_income_record_id").references(() => incomeRecords.id, {
+      onDelete: "set null",
+    }),
+    matchStatus: varchar("match_status", { length: 32 }).notNull().default("pending"),
+    rawPayload: jsonb("raw_payload")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("budget_month_txn_import_uidx")
+      .on(t.importedTransactionId)
+      .where(sql`${t.importedTransactionId} IS NOT NULL`),
+  ],
+)
 
 export const allocationRecords = pgTable("allocation_records", {
   id: uuid("id").primaryKey().defaultRandom(),

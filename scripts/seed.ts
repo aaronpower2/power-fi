@@ -16,6 +16,7 @@ async function main() {
   const [seedGoal] = await db
     .insert(s.goals)
     .values({
+      name: "Seed NZD goal",
       fiDate: "2040-12-01",
       withdrawalRate: "0.04",
       monthlyFundingRequirement: "6000",
@@ -86,7 +87,14 @@ async function main() {
 
   const [cat] = await db
     .insert(s.expenseCategories)
-    .values({ name: "Life", sortOrder: 0 })
+    .values({
+      name: "Life",
+      sortOrder: 0,
+      isRecurring: true,
+      frequency: "monthly",
+      recurringAmount: "7500",
+      recurringCurrency: "AED",
+    })
     .returning()
 
   const [exLine] = await db
@@ -94,10 +102,6 @@ async function main() {
     .values({
       categoryId: cat.id,
       name: "All-in",
-      isRecurring: true,
-      frequency: "monthly",
-      recurringAmount: "7500",
-      recurringCurrency: "AED",
     })
     .returning()
 

@@ -5,7 +5,7 @@ import { eq } from "drizzle-orm"
 import { z } from "zod"
 
 import { err, ok, type ActionResult } from "@/lib/action-result"
-import { monthlyPlannedForLine } from "@/lib/budget/planned-line"
+import { monthlyPlannedForExpenseCategory, monthlyPlannedForLine } from "@/lib/budget/planned-line"
 import {
   parseYearMonthYm,
   utcMonthBoundsForCalendarMonth,
@@ -56,7 +56,7 @@ export async function createIncomeLine(input: unknown): Promise<ActionResult<{ i
       frequency: v.frequency,
       recurringAmount:
         v.recurringAmount != null ? v.recurringAmount.toFixed(2) : null,
-      recurringCurrency: v.recurringCurrency ?? "USD",
+      recurringCurrency: v.recurringCurrency ?? "AED",
       recurringAnchorDate: v.recurringAnchorDate ?? null,
     })
     .returning({ id: incomeLines.id })
@@ -78,7 +78,7 @@ export async function updateIncomeLine(input: unknown): Promise<ActionResult> {
       frequency: v.frequency,
       recurringAmount:
         v.recurringAmount != null ? v.recurringAmount.toFixed(2) : null,
-      recurringCurrency: v.recurringCurrency ?? "USD",
+      recurringCurrency: v.recurringCurrency ?? "AED",
       recurringAnchorDate: v.recurringAnchorDate ?? null,
     })
     .where(eq(incomeLines.id, v.id))
@@ -149,7 +149,15 @@ export async function createExpenseCategory(
   const v = parsed.data
   const [row] = await db
     .insert(expenseCategories)
-    .values({ name: v.name, sortOrder: v.sortOrder })
+    .values({
+      name: v.name,
+      sortOrder: v.sortOrder,
+      isRecurring: v.isRecurring,
+      frequency: v.frequency,
+      recurringAmount:
+        v.recurringAmount != null ? v.recurringAmount.toFixed(2) : null,
+      recurringCurrency: v.recurringCurrency ?? "AED",
+    })
     .returning({ id: expenseCategories.id })
   rev()
   return ok({ id: row.id })
@@ -163,7 +171,15 @@ export async function updateExpenseCategory(input: unknown): Promise<ActionResul
   const v = parsed.data
   await db
     .update(expenseCategories)
-    .set({ name: v.name, sortOrder: v.sortOrder })
+    .set({
+      name: v.name,
+      sortOrder: v.sortOrder,
+      isRecurring: v.isRecurring,
+      frequency: v.frequency,
+      recurringAmount:
+        v.recurringAmount != null ? v.recurringAmount.toFixed(2) : null,
+      recurringCurrency: v.recurringCurrency ?? "AED",
+    })
     .where(eq(expenseCategories.id, v.id))
   rev()
   return ok()
@@ -188,12 +204,6 @@ export async function createExpenseLine(input: unknown): Promise<ActionResult<{ 
     .values({
       categoryId: v.categoryId,
       name: v.name,
-      isRecurring: v.isRecurring,
-      frequency: v.frequency,
-      recurringAmount:
-        v.recurringAmount != null ? v.recurringAmount.toFixed(2) : null,
-      recurringCurrency: v.recurringCurrency ?? "USD",
-      recurringAnchorDate: v.recurringAnchorDate ?? null,
     })
     .returning({ id: expenseLines.id })
   rev()
@@ -211,12 +221,6 @@ export async function updateExpenseLine(input: unknown): Promise<ActionResult> {
     .set({
       categoryId: v.categoryId,
       name: v.name,
-      isRecurring: v.isRecurring,
-      frequency: v.frequency,
-      recurringAmount:
-        v.recurringAmount != null ? v.recurringAmount.toFixed(2) : null,
-      recurringCurrency: v.recurringCurrency ?? "USD",
-      recurringAnchorDate: v.recurringAnchorDate ?? null,
     })
     .where(eq(expenseLines.id, v.id))
   rev()
@@ -298,7 +302,7 @@ export async function finalizeBudgetMonth(input: unknown): Promise<ActionResult>
   }
 
   const incomeRows = await db.select().from(incomeLines)
-  const expenseRows = await db.select().from(expenseLines)
+  const expenseCategoryRows = await db.select().from(expenseCategories)
   const { end } = utcMonthBoundsForCalendarMonth(parts.year, parts.monthIndex0)
 
   await db.transaction(async (tx) => {
@@ -311,18 +315,20 @@ export async function finalizeBudgetMonth(input: unknown): Promise<ActionResult>
         lineKind: "income",
         incomeLineId: line.id,
         expenseLineId: null,
+        expenseCategoryId: null,
         currency,
         plannedAmount: amount.toFixed(2),
       })
     }
 
-    for (const line of expenseRows) {
-      const { currency, amount } = monthlyPlannedForLine(line, start, end)
+    for (const cat of expenseCategoryRows) {
+      const { currency, amount } = monthlyPlannedForExpenseCategory(cat)
       await tx.insert(budgetMonthPlanLines).values({
         periodMonth: start,
-        lineKind: "expense",
+        lineKind: "expense_category",
         incomeLineId: null,
-        expenseLineId: line.id,
+        expenseLineId: null,
+        expenseCategoryId: cat.id,
         currency,
         plannedAmount: amount.toFixed(2),
       })

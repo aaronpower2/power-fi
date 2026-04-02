@@ -2,7 +2,14 @@
 
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useRouter } from "next/navigation"
-import { useEffect, useState, type Dispatch, type SetStateAction } from "react"
+import {
+  useEffect,
+  useMemo,
+  useState,
+  useTransition,
+  type Dispatch,
+  type SetStateAction,
+} from "react"
 import { useForm, useWatch } from "react-hook-form"
 import { toast } from "sonner"
 
@@ -47,7 +54,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   Dialog,
   DialogContent,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
@@ -60,6 +66,7 @@ import {
   FormMessage,
 } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   Select,
   SelectContent,
@@ -67,6 +74,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { Switch } from "@/components/ui/switch"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -92,8 +100,22 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { TransactionsTab } from "@/components/budget/transactions-tab"
-import { MoreHorizontal } from "lucide-react"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
+import { ImportTransactionsPanel } from "@/components/budget/transactions-tab"
+import { cn } from "@/lib/utils"
+import {
+  ClipboardList,
+  FileSearch,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  Trash2,
+} from "lucide-react"
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as RechartsTooltip } from "recharts"
 import { z } from "zod"
 
 type BudgetData = Awaited<ReturnType<typeof getBudgetPageData>>
@@ -102,7 +124,7 @@ function formatSummaryCcyValue(ccy: string, value: number) {
   const code = ccy.toUpperCase()
   const n = new Intl.NumberFormat("en-US", {
     minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
+    maximumFractionDigits: 0,
   }).format(value)
   return `${code} ${n}`
 }
@@ -117,13 +139,13 @@ function PlannedActualSummaryPair({
   actual: number
 }) {
   return (
-    <div className="min-w-0 space-y-0.5">
-      <div className="font-heading grid grid-cols-[1fr_auto_1fr] items-baseline gap-x-1 text-sm font-semibold tabular-nums leading-tight">
+    <div className="min-w-0 space-y-1">
+      <div className="font-heading grid grid-cols-[1fr_auto_1fr] items-baseline gap-x-1 text-lg font-semibold tabular-nums leading-tight xl:text-xl">
         <span className="min-w-0 truncate">{formatSummaryCcyValue(ccy, planned)}</span>
-        <span className="text-muted-foreground shrink-0 font-normal">/</span>
+        <span className="text-muted-foreground shrink-0 text-base font-normal xl:text-lg">/</span>
         <span className="min-w-0 truncate text-end">{formatSummaryCcyValue(ccy, actual)}</span>
       </div>
-      <div className="text-muted-foreground grid grid-cols-[1fr_auto_1fr] gap-x-1 text-[10px] font-medium tracking-wide uppercase">
+      <div className="text-muted-foreground grid grid-cols-[1fr_auto_1fr] gap-x-1 text-xs font-medium tracking-wide uppercase">
         <span className="min-w-0 truncate">Planned</span>
         <span aria-hidden className="pointer-events-none shrink-0 select-none opacity-0">
           /
@@ -144,7 +166,7 @@ function formatNativeLineTotals(buckets: Record<string, number> | undefined) {
       {keys.map((ccy, i) => (
         <span key={ccy}>
           {i > 0 ? " · " : null}
-          {formatCurrency(buckets[ccy], ccy)}
+          {formatCurrency(buckets[ccy], ccy, { maximumFractionDigits: 0 })}
         </span>
       ))}
     </span>
@@ -164,6 +186,22 @@ function nativeVarianceBuckets(
   return out
 }
 
+function plannedBucketsWithPositiveAmount(
+  planned: Record<string, number> | undefined,
+): { currency: string; amount: number }[] {
+  if (!planned) return []
+  return Object.entries(planned)
+    .filter(([, v]) => Number.isFinite(v) && v > 0)
+    .map(([currency, amount]) => ({ currency, amount }))
+}
+
+/** Prefer today when it falls in the budget month; otherwise use month end (UTC). */
+function defaultBudgetRecordDateForMonth(monthStart: string, monthEnd: string): string {
+  const today = new Date().toISOString().slice(0, 10)
+  if (today >= monthStart && today <= monthEnd) return today
+  return monthEnd
+}
+
 type IncomeLineDialogState =
   | "create"
   | { edit: BudgetData["incomeLines"][number] }
@@ -179,6 +217,472 @@ type ExpenseLineDialogState =
   | { edit: BudgetData["expenseLines"][number] }
   | null
 
+const EXPENSE_PIE_COLORS = [
+  "var(--color-chart-1)",
+  "var(--color-chart-2)",
+  "var(--color-chart-3)",
+  "var(--color-chart-4)",
+  "var(--color-chart-5)",
+]
+
+function ExpenseCategoryPieCard({
+  data,
+  onManageCategories,
+}: {
+  data: BudgetData
+  onManageCategories: () => void
+}) {
+  const ccy = data.summaryCurrency
+  const pieRows = data.expenseCategories
+    .map((c) => ({
+      id: c.id,
+      name: c.name,
+      value: data.expensePlannedByCategoryId[c.id] ?? 0,
+    }))
+    .filter((d) => d.value > 0)
+    .sort((a, b) => b.value - a.value)
+
+  const totalPlanned = pieRows.reduce((s, d) => s + d.value, 0)
+
+  return (
+    <Card size="sm">
+      <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <CardHeaderTitleRow
+          title={<CardTitle>Expense categories</CardTitle>}
+          info="Planned amounts for this month, rolled up by category and converted to your summary currency (same as the summary cards)."
+        />
+        <Button size="sm" variant="default" className="shrink-0" onClick={onManageCategories}>
+          Manage categories
+        </Button>
+      </CardHeader>
+      <CardContent className="pt-0 pb-3">
+        {pieRows.length === 0 ? (
+          <p className="text-muted-foreground py-4 text-center text-sm">
+            {data.expenseCategories.length === 0
+              ? "Add categories (with optional recurring budgets), then lines, to see planned spending by category."
+              : "No planned amounts this month yet — set a recurring budget on categories or finalize a past month."}
+          </p>
+        ) : (
+          <div className="flex flex-col items-center gap-3 sm:flex-row sm:items-center sm:gap-5">
+            <div className="h-[168px] w-full max-w-[200px] shrink-0">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={pieRows}
+                    dataKey="value"
+                    nameKey="name"
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={38}
+                    outerRadius={64}
+                    paddingAngle={2}
+                  >
+                    {pieRows.map((_, i) => (
+                      <Cell key={pieRows[i]!.id} fill={EXPENSE_PIE_COLORS[i % EXPENSE_PIE_COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <RechartsTooltip
+                    content={({ active, payload }) => (
+                      <ExpensePieTooltip
+                        active={active}
+                        payload={payload}
+                        total={totalPlanned}
+                        currency={ccy}
+                      />
+                    )}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            <ul className="text-muted-foreground w-full max-w-md space-y-1 text-xs sm:flex-1 sm:text-sm">
+              {pieRows.map((row, i) => {
+                const pct = totalPlanned > 0 ? (row.value / totalPlanned) * 100 : 0
+                return (
+                  <li key={row.id} className="flex items-center gap-1.5">
+                    <span
+                      className="size-2 shrink-0 rounded-sm"
+                      style={{ backgroundColor: EXPENSE_PIE_COLORS[i % EXPENSE_PIE_COLORS.length] }}
+                      aria-hidden
+                    />
+                    <span className="min-w-0 flex-1 truncate font-medium text-foreground">{row.name}</span>
+                    <span className="tabular-nums">{pct.toFixed(0)}%</span>
+                    <span className="text-foreground w-28 shrink-0 text-right tabular-nums">
+                      {formatCurrency(row.value, ccy, { maximumFractionDigits: 0 })}
+                    </span>
+                  </li>
+                )
+              })}
+            </ul>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function ExpensePieTooltip({
+  active,
+  payload,
+  total,
+  currency,
+}: {
+  active?: boolean
+  payload?: readonly { name?: unknown; value?: unknown }[]
+  total: number
+  currency: string
+}) {
+  if (!active || !payload?.length) return null
+  const p = payload[0]
+  const name = p?.name != null ? String(p.name) : ""
+  const raw = p?.value
+  const value = typeof raw === "number" ? raw : Number(raw ?? 0)
+  const pct = total > 0 ? (value / total) * 100 : 0
+  return (
+    <div
+      className="rounded-md border bg-card px-3 py-2 text-sm shadow-md"
+      style={{ borderColor: "var(--border)" }}
+    >
+      <div className="font-medium">{name}</div>
+      <div className="text-muted-foreground tabular-nums">
+        {formatCurrency(value, currency, { maximumFractionDigits: 0 })} ({pct.toFixed(1)}%)
+      </div>
+    </div>
+  )
+}
+
+type ExpenseCategoryDraft = {
+  name: string
+  isRecurring: boolean
+  frequency: BudgetRecurringFrequency
+  recurringAmount: string
+  recurringCurrency: string
+}
+
+function normalizeWholeCurrencyAmountInput(value: string | number | null | undefined) {
+  if (value == null || value === "") return ""
+  return String(value).replace(/\..*$/, "")
+}
+
+function expenseCategoryToDraft(c: BudgetData["expenseCategories"][number]): ExpenseCategoryDraft {
+  return {
+    name: c.name,
+    isRecurring: c.isRecurring,
+    frequency: parseBudgetFrequency(c.frequency) ?? "monthly",
+    recurringAmount: normalizeWholeCurrencyAmountInput(c.recurringAmount),
+    recurringCurrency: c.isRecurring ? (c.recurringCurrency ?? "AED") : "AED",
+  }
+}
+
+function expenseCategoryDraftMatchesServer(
+  draft: ExpenseCategoryDraft,
+  c: BudgetData["expenseCategories"][number],
+): boolean {
+  const s = expenseCategoryToDraft(c)
+  return (
+    draft.name === s.name &&
+    draft.isRecurring === s.isRecurring &&
+    draft.frequency === s.frequency &&
+    draft.recurringAmount === s.recurringAmount &&
+    draft.recurringCurrency === s.recurringCurrency
+  )
+}
+
+function buildExpenseCategoryUpdatePayload(
+  c: BudgetData["expenseCategories"][number],
+  draft: ExpenseCategoryDraft,
+) {
+  const parsedAmount =
+    draft.isRecurring && draft.recurringAmount.trim() !== "" ? Number(draft.recurringAmount) : null
+
+  return updateExpenseCategorySchema.safeParse({
+    id: c.id,
+    name: draft.name.trim(),
+    sortOrder: c.sortOrder,
+    isRecurring: draft.isRecurring,
+    frequency: draft.isRecurring ? draft.frequency : null,
+    recurringAmount: parsedAmount,
+    recurringCurrency: draft.isRecurring ? draft.recurringCurrency : null,
+  })
+}
+
+function ExpenseCategoryInlineManageRow({
+  c,
+  draft,
+  onDraftChange,
+  onRequestDelete,
+  disabled = false,
+}: {
+  c: BudgetData["expenseCategories"][number]
+  draft: ExpenseCategoryDraft
+  onDraftChange: (next: ExpenseCategoryDraft) => void
+  onRequestDelete: (id: string) => void
+  disabled?: boolean
+}) {
+  const controlH = "h-9"
+  const planEnabled = draft.isRecurring
+
+  return (
+    <div className="border-border/70 flex flex-nowrap items-center gap-2 border-b py-2.5 last:border-b-0 md:gap-2.5">
+      <div className="min-w-0 flex-1">
+        <Label htmlFor={`ecat-name-${c.id}`} className="sr-only">
+          Name
+        </Label>
+        <Input
+          id={`ecat-name-${c.id}`}
+          value={draft.name}
+          onChange={(e) => onDraftChange({ ...draft, name: e.target.value })}
+          className={cn(controlH, "min-w-0")}
+          disabled={disabled}
+        />
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <div className="flex h-9 w-11 shrink-0 items-center justify-center">
+          <Switch
+            id={`ecat-plan-${c.id}`}
+            checked={draft.isRecurring}
+            onCheckedChange={(checked) =>
+              onDraftChange({
+                ...draft,
+                isRecurring: checked,
+                recurringCurrency: checked ? (draft.recurringCurrency || "AED") : "AED",
+              })
+            }
+            aria-label={`Enable planned budget for ${c.name}`}
+            disabled={disabled}
+          />
+        </div>
+        <Select
+          disabled={disabled || !planEnabled}
+          value={draft.frequency}
+          onValueChange={(v) => onDraftChange({ ...draft, frequency: v as BudgetRecurringFrequency })}
+        >
+          <SelectTrigger className={cn(controlH, "w-[7.25rem] shrink-0 px-2")}>
+            <SelectValue placeholder="Freq" />
+          </SelectTrigger>
+          <SelectContent>
+            {BUDGET_RECURRING_FREQUENCIES.map((f) => (
+              <SelectItem key={f} value={f}>
+                {BUDGET_FREQUENCY_LABELS[f]}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Input
+          type="number"
+          step="1"
+          min="0"
+          disabled={disabled || !planEnabled}
+          value={draft.recurringAmount}
+          onChange={(e) =>
+            onDraftChange({
+              ...draft,
+              recurringAmount: normalizeWholeCurrencyAmountInput(e.target.value),
+            })
+          }
+          className={cn(controlH, "w-24 shrink-0 tabular-nums")}
+          aria-label="Amount per period"
+        />
+        <Select
+          disabled={disabled || !planEnabled}
+          value={draft.recurringCurrency}
+          onValueChange={(v) => onDraftChange({ ...draft, recurringCurrency: v })}
+        >
+          <SelectTrigger className={cn(controlH, "w-16 shrink-0 px-2")}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {SUPPORTED_CURRENCIES.map((code) => (
+              <SelectItem key={code} value={code}>
+                {code}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="ml-auto flex w-9 shrink-0 items-center justify-end">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon-lg" aria-label="More actions" disabled={disabled}>
+              <MoreHorizontal />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              variant="destructive"
+              onSelect={(e) => {
+                e.preventDefault()
+                onRequestDelete(c.id)
+              }}
+            >
+              <Trash2 className="size-4 opacity-70" />
+              Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </div>
+  )
+}
+
+function ExpenseCategoriesManageDialog({
+  open,
+  onOpenChange,
+  categories,
+  onAdd,
+  onRequestDelete,
+  refresh,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  categories: BudgetData["expenseCategories"]
+  onAdd: () => void
+  onRequestDelete: (id: string) => void
+  refresh: () => void
+}) {
+  const [drafts, setDrafts] = useState<Record<string, ExpenseCategoryDraft>>({})
+  const [isSavingAll, startSavingAll] = useTransition()
+
+  const categoriesKey = useMemo(
+    () =>
+      categories
+        .map((c) =>
+          [c.id, c.name, c.sortOrder, c.isRecurring, c.frequency ?? "", c.recurringAmount ?? "", c.recurringCurrency ?? ""].join(
+            "\0",
+          ),
+        )
+        .join("\n"),
+    [categories],
+  )
+
+  useEffect(() => {
+    setDrafts(
+      Object.fromEntries(categories.map((c) => [c.id, expenseCategoryToDraft(c)])) as Record<
+        string,
+        ExpenseCategoryDraft
+      >,
+    )
+  }, [categoriesKey, categories, open])
+
+  const dirtyCategories = useMemo(
+    () =>
+      categories.filter((c) => {
+        const draft = drafts[c.id]
+        return draft ? !expenseCategoryDraftMatchesServer(draft, c) : false
+      }),
+    [categories, drafts],
+  )
+
+  function setDraftFor(id: string, next: ExpenseCategoryDraft) {
+    setDrafts((current) => ({ ...current, [id]: next }))
+  }
+
+  function saveAll() {
+    if (dirtyCategories.length === 0) return
+
+    const prepared = dirtyCategories.map((c) => {
+      const draft = drafts[c.id] ?? expenseCategoryToDraft(c)
+      return { c, parsed: buildExpenseCategoryUpdatePayload(c, draft) }
+    })
+
+    const invalid = prepared.find(({ parsed }) => !parsed.success)
+    if (invalid && !invalid.parsed.success) {
+      toast.error(invalid.parsed.error.issues.map((i) => i.message).join(" "))
+      return
+    }
+
+    startSavingAll(() => {
+      void (async () => {
+        for (const item of prepared) {
+          if (!item.parsed.success) continue
+          const result = await updateExpenseCategory(item.parsed.data)
+          if (!result.ok) {
+            toast.error(result.error)
+            return
+          }
+        }
+
+        toast.success(
+          dirtyCategories.length === 1
+            ? "1 category saved"
+            : `${dirtyCategories.length} categories saved`,
+        )
+        refresh()
+      })()
+    })
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent showCloseButton fullViewport>
+        <div className="border-b px-4 py-3 pr-14 shrink-0">
+          <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0 text-left">
+            <DialogTitle className="pr-0">Categories</DialogTitle>
+            <Button
+              type="button"
+              size="sm"
+              className="shrink-0"
+              onClick={() => {
+                onOpenChange(false)
+                onAdd()
+              }}
+            >
+              Add category
+            </Button>
+          </DialogHeader>
+          <p className="text-muted-foreground mt-2 text-sm">
+            Edit name and planned budget per row, then <span className="font-medium">Save</span>. Expense
+            lines under each category track actual spend.
+          </p>
+        </div>
+        <div className="min-h-0 flex-1 overflow-x-auto overflow-y-auto px-4 pb-6 pt-4">
+          {categories.length === 0 ? (
+            <p className="text-muted-foreground py-10 text-center text-sm">None yet — use Add category.</p>
+          ) : (
+            <div className="min-w-[660px]">
+              <div className="text-muted-foreground mb-1 flex flex-nowrap items-center gap-2 border-b pb-2 text-xs font-medium md:gap-2.5">
+                <span className="min-w-0 flex-1">Name</span>
+                <span className="flex shrink-0 items-center gap-2">
+                  <span className="inline-flex w-11 justify-center" title="Plan">
+                    Plan
+                  </span>
+                  <span className="inline-block w-[7.25rem] shrink-0">Frequency</span>
+                  <span className="inline-block w-24 shrink-0">Amount</span>
+                  <span className="inline-block w-16 shrink-0">Ccy</span>
+                </span>
+                <span className="ml-auto w-[116px] shrink-0 text-end">Actions</span>
+              </div>
+              <div>
+                {categories.map((c) => (
+                  <ExpenseCategoryInlineManageRow
+                    key={c.id}
+                    c={c}
+                    draft={drafts[c.id] ?? expenseCategoryToDraft(c)}
+                    onDraftChange={(next) => setDraftFor(c.id, next)}
+                    onRequestDelete={onRequestDelete}
+                    disabled={isSavingAll}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="bg-background/95 border-t px-4 py-3 shrink-0 backdrop-blur supports-backdrop-filter:bg-background/80">
+          <div className="flex items-center justify-end gap-2">
+            <Button
+              type="button"
+              size="lg"
+              disabled={dirtyCategories.length === 0 || isSavingAll}
+              onClick={saveAll}
+            >
+              {isSavingAll ? "Saving…" : `Save changes${dirtyCategories.length ? ` (${dirtyCategories.length})` : ""}`}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 export function BudgetManager({ data }: { data: BudgetData }) {
   const router = useRouter()
   const refresh = () => router.refresh()
@@ -187,13 +691,14 @@ export function BudgetManager({ data }: { data: BudgetData }) {
   const [incomeLineDialog, setIncomeLineDialog] = useState<IncomeLineDialogState>(null)
   const [expenseCatDialog, setExpenseCatDialog] = useState<ExpenseCatDialogState>(null)
   const [expenseLineDialog, setExpenseLineDialog] = useState<ExpenseLineDialogState>(null)
+  const [expenseCategoriesManageOpen, setExpenseCategoriesManageOpen] = useState(false)
 
   return (
-    <div className="space-y-6">
+    <div id="budget-detail" className="space-y-6 scroll-mt-4">
       {data.isPastMonth && !data.planUsesSnapshot ? (
         <p className="text-muted-foreground bg-muted/40 rounded-md border px-3 py-2 text-sm">
-          This month is in the past: planned column uses live line rules until you finalize (then it stays
-          locked).
+          This month is in the past: planned amounts use live rules until you finalize (income lines +
+          expense categories; then the snapshot stays locked).
         </p>
       ) : null}
       {data.fxWarning ? (
@@ -210,7 +715,7 @@ export function BudgetManager({ data }: { data: BudgetData }) {
             />
           </CardHeader>
           <CardContent className="pb-3 pt-0">
-            <p className="font-heading text-primary text-2xl font-semibold leading-tight tabular-nums xl:text-3xl">
+            <p className="font-heading text-primary text-3xl font-semibold leading-tight tabular-nums xl:text-4xl">
               {formatCurrency(data.totals.investableActual, data.summaryCurrency)}
             </p>
           </CardContent>
@@ -234,7 +739,7 @@ export function BudgetManager({ data }: { data: BudgetData }) {
           <CardHeader className="gap-0 pb-1 pt-3">
             <CardHeaderTitleRow
               title={<CardTitle className="text-sm leading-tight">Expenses</CardTitle>}
-              info="Planned from recurring budget lines or a finalized snapshot; actual from expense records in this UTC month. Amounts use the summary currency you select."
+              info="Planned from recurring rules on each expense category (or a finalized snapshot); actual from expense line records in this UTC month. Amounts use the summary currency you select."
             />
           </CardHeader>
           <CardContent className="pb-3 pt-0">
@@ -248,29 +753,10 @@ export function BudgetManager({ data }: { data: BudgetData }) {
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <TabsList>
-            <TabsTrigger value="income">Income</TabsTrigger>
-            <TabsTrigger value="expenses">Expenses</TabsTrigger>
-            <TabsTrigger value="transactions">Transactions</TabsTrigger>
-          </TabsList>
-          <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-            {activeTab === "income" ? (
-              <Button size="sm" onClick={() => setIncomeLineDialog("create")}>
-                Add income line
-              </Button>
-            ) : activeTab === "expenses" ? (
-              <>
-                <Button size="sm" variant="secondary" onClick={() => setExpenseCatDialog("create")}>
-                  Add category
-                </Button>
-                <Button size="sm" onClick={() => setExpenseLineDialog("create")}>
-                  Add expense line
-                </Button>
-              </>
-            ) : null}
-          </div>
-        </div>
+        <TabsList>
+          <TabsTrigger value="income">Income</TabsTrigger>
+          <TabsTrigger value="expenses">Expenses</TabsTrigger>
+        </TabsList>
         <TabsContent value="income" className="mt-4">
           <IncomeTab
             data={data}
@@ -287,10 +773,9 @@ export function BudgetManager({ data }: { data: BudgetData }) {
             setCatDialog={setExpenseCatDialog}
             lineDialog={expenseLineDialog}
             setLineDialog={setExpenseLineDialog}
+            categoriesManageOpen={expenseCategoriesManageOpen}
+            setCategoriesManageOpen={setExpenseCategoriesManageOpen}
           />
-        </TabsContent>
-        <TabsContent value="transactions" className="mt-4">
-          <TransactionsTab />
         </TabsContent>
       </Tabs>
     </div>
@@ -310,20 +795,54 @@ function IncomeTab({
 }) {
   const [recLine, setRecLine] = useState<(typeof data.incomeLines)[0] | null>(null)
   const [delLine, setDelLine] = useState<string | null>(null)
+  const [recordingPlannedForLineId, setRecordingPlannedForLineId] = useState<string | null>(null)
+
+  async function recordPlannedForIncomeLine(line: BudgetData["incomeLines"][number]) {
+    const planned = data.incomePlannedByLineNative[line.id]
+    const plannedParts = plannedBucketsWithPositiveAmount(planned)
+    if (plannedParts.length === 0) return
+    const occurredOn = defaultBudgetRecordDateForMonth(data.monthStart, data.monthEnd)
+    setRecordingPlannedForLineId(line.id)
+    try {
+      for (const { currency, amount } of plannedParts) {
+        const r = await createIncomeRecord({
+          incomeLineId: line.id,
+          amount,
+          currency,
+          occurredOn,
+        })
+        if (!r.ok) {
+          toast.error(r.error)
+          return
+        }
+      }
+      toast.success(
+        plannedParts.length > 1 ? "Planned amounts recorded" : "Planned amount recorded",
+      )
+      refresh()
+    } finally {
+      setRecordingPlannedForLineId(null)
+    }
+  }
 
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <CardHeaderTitleRow
             title={<CardTitle>Income lines</CardTitle>}
             info={
               <>
                 Planned column uses recurring rules (or a finalized snapshot for past months). Actual column is
-                from records only. Line cells stay in native currencies (not converted to your goal currency).
+                from records only. Line cells stay in native currencies (not converted to your goal currency). Use
+                the + button in Actions (or Record planned in the menu) to post actuals matching this month&apos;s
+                planned amounts.
               </>
             }
           />
+          <Button size="sm" variant="default" className="shrink-0" onClick={() => setLineDialog("create")}>
+            Add income line
+          </Button>
         </CardHeader>
         <CardContent>
           <Table>
@@ -333,7 +852,7 @@ function IncomeTab({
                 <TableHead className="text-right">Planned</TableHead>
                 <TableHead className="text-right">Actual</TableHead>
                 <TableHead className="text-right">Variance</TableHead>
-                <TableHead className="w-12" />
+                <TableHead className="w-24 text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -348,6 +867,8 @@ function IncomeTab({
                   const freq = parseBudgetFrequency(line.frequency)
                   const planned = data.incomePlannedByLineNative[line.id]
                   const actual = data.incomeActualByLineNative[line.id]
+                  const plannedParts = plannedBucketsWithPositiveAmount(planned)
+                  const canRecordPlanned = plannedParts.length > 0
                   return (
                   <TableRow key={line.id}>
                     <TableCell>
@@ -368,28 +889,57 @@ function IncomeTab({
                       {formatNativeLineTotals(nativeVarianceBuckets(planned, actual))}
                     </TableCell>
                     <TableCell>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon-sm" aria-label="Actions">
-                            <MoreHorizontal />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => setRecLine(line)}>Records</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => setLineDialog({ edit: line })}>
-                            Edit
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            variant="destructive"
-                            onSelect={(e) => {
-                              e.preventDefault()
-                              setDelLine(line.id)
-                            }}
-                          >
-                            Delete
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                      <div className="flex items-center justify-end gap-0.5">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              className="shrink-0"
+                              disabled={!canRecordPlanned || recordingPlannedForLineId === line.id}
+                              aria-label="Record planned amount as actual"
+                              onClick={() => void recordPlannedForIncomeLine(line)}
+                            >
+                              <Plus className="size-4" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent side="left">Record planned amount</TooltipContent>
+                        </Tooltip>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon-sm" aria-label="More actions">
+                              <MoreHorizontal />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => setRecLine(line)}>
+                              <ClipboardList className="size-4 opacity-70" />
+                              Records
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              disabled={!canRecordPlanned || recordingPlannedForLineId === line.id}
+                              onClick={() => void recordPlannedForIncomeLine(line)}
+                            >
+                              <Plus className="size-4 opacity-70" />
+                              Record planned
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => setLineDialog({ edit: line })}>
+                              <Pencil className="size-4 opacity-70" />
+                              Edit
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              variant="destructive"
+                              onSelect={(e) => {
+                                e.preventDefault()
+                                setDelLine(line.id)
+                              }}
+                            >
+                              <Trash2 className="size-4 opacity-70" />
+                              Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
                     </TableCell>
                   </TableRow>
                   )
@@ -480,7 +1030,7 @@ function IncomeLineFormDialog({
       isRecurring: false,
       frequency: "monthly",
       recurringAmount: "",
-      recurringCurrency: "USD",
+      recurringCurrency: "AED",
       recurringAnchorDate: "",
     },
   })
@@ -497,7 +1047,7 @@ function IncomeLineFormDialog({
           line?.recurringAmount != null && line.recurringAmount !== ""
             ? String(line.recurringAmount)
             : "",
-        recurringCurrency: line?.recurringCurrency ?? "USD",
+        recurringCurrency: line?.recurringCurrency ?? "AED",
         recurringAnchorDate: normalizeRecurringAnchorDate(line?.recurringAnchorDate) ?? "",
       })
     }
@@ -545,14 +1095,21 @@ function IncomeLineFormDialog({
     }
   }
 
+  const formId = isEdit ? "budget-income-line-edit" : "budget-income-line-create"
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{isEdit ? "Edit income line" : "New income line"}</DialogTitle>
+        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+          <DialogTitle className="min-w-0 flex-1 pr-8">
+            {isEdit ? "Edit income line" : "New income line"}
+          </DialogTitle>
+          <Button type="submit" form={formId} size="sm" className="shrink-0">
+            {isEdit ? "Save" : "Create"}
+          </Button>
         </DialogHeader>
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
+          <form id={formId} onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
             <FormField
               control={form.control}
               name="name"
@@ -673,9 +1230,6 @@ function IncomeLineFormDialog({
                 />
               </>
             ) : null}
-            <DialogFooter>
-              <Button type="submit">{isEdit ? "Save" : "Create"}</Button>
-            </DialogFooter>
           </form>
         </Form>
       </DialogContent>
@@ -701,7 +1255,7 @@ function IncomeRecordsDialog({
     defaultValues: {
       incomeLineId: line.id,
       amount: 0,
-      currency: "USD",
+      currency: "AED",
       occurredOn: new Date().toISOString().slice(0, 10),
     },
   })
@@ -711,7 +1265,7 @@ function IncomeRecordsDialog({
       addForm.reset({
         incomeLineId: line.id,
         amount: 0,
-        currency: "USD",
+        currency: "AED",
         occurredOn: new Date().toISOString().slice(0, 10),
       })
     }
@@ -724,18 +1278,20 @@ function IncomeRecordsDialog({
       addForm.reset({
         incomeLineId: line.id,
         amount: 0,
-        currency: "USD",
+        currency: "AED",
         occurredOn: new Date().toISOString().slice(0, 10),
       })
       onSaved()
     } else toast.error(r.error)
   }
 
+  const recordFormId = `budget-income-record-${line.id}`
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
-        <DialogHeader>
-          <div className="flex items-center gap-1.5 pr-8">
+        <DialogHeader className="flex flex-row flex-wrap items-start justify-between gap-2 space-y-0">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 pr-8">
             <DialogTitle>Records — {line.name}</DialogTitle>
             {line.isRecurring ? (
               <InfoTooltip>
@@ -744,6 +1300,9 @@ function IncomeRecordsDialog({
               </InfoTooltip>
             ) : null}
           </div>
+          <Button type="submit" form={recordFormId} size="sm" className="shrink-0">
+            Add record
+          </Button>
         </DialogHeader>
         <Table>
           <TableHeader>
@@ -765,7 +1324,7 @@ function IncomeRecordsDialog({
                 <TableRow key={r.id}>
                   <TableCell className="font-mono text-xs">{r.occurredOn}</TableCell>
                   <TableCell className="text-right">
-                    {formatCurrency(Number(r.amount), r.currency ?? "USD")}
+                    {formatCurrency(Number(r.amount), r.currency ?? "AED")}
                   </TableCell>
                   <TableCell>
                     <Button
@@ -789,7 +1348,11 @@ function IncomeRecordsDialog({
           </TableBody>
         </Table>
         <Form {...addForm}>
-          <form onSubmit={addForm.handleSubmit(addRec)} className="flex flex-wrap gap-2 border-t pt-4">
+          <form
+            id={recordFormId}
+            onSubmit={addForm.handleSubmit(addRec)}
+            className="flex flex-wrap gap-2 border-t pt-4"
+          >
             <input type="hidden" {...addForm.register("incomeLineId")} />
             <FormField
               control={addForm.control}
@@ -841,11 +1404,6 @@ function IncomeRecordsDialog({
                 </FormItem>
               )}
             />
-            <div className="flex w-full items-end sm:w-auto">
-              <Button type="submit" size="sm">
-                Add record
-              </Button>
-            </div>
           </form>
         </Form>
       </DialogContent>
@@ -860,6 +1418,8 @@ function ExpensesTab({
   setCatDialog,
   lineDialog,
   setLineDialog,
+  categoriesManageOpen,
+  setCategoriesManageOpen,
 }: {
   data: BudgetData
   refresh: () => void
@@ -867,76 +1427,59 @@ function ExpensesTab({
   setCatDialog: Dispatch<SetStateAction<ExpenseCatDialogState>>
   lineDialog: ExpenseLineDialogState
   setLineDialog: Dispatch<SetStateAction<ExpenseLineDialogState>>
+  categoriesManageOpen: boolean
+  setCategoriesManageOpen: Dispatch<SetStateAction<boolean>>
 }) {
   const [recLine, setRecLine] = useState<(typeof data.expenseLines)[0] | null>(null)
   const [delCat, setDelCat] = useState<string | null>(null)
   const [delLine, setDelLine] = useState<string | null>(null)
+  const [importTxOpen, setImportTxOpen] = useState(false)
 
   return (
     <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <CardHeaderTitleRow
-            title={<CardTitle>Categories</CardTitle>}
-            info="Expense lines are grouped under a category. Add at least one category before creating lines."
-          />
-        </CardHeader>
-        <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead className="w-12" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {data.expenseCategories.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={2} className="text-muted-foreground h-14 text-center">
-                    None yet
-                  </TableCell>
-                </TableRow>
-              ) : (
-                data.expenseCategories.map((c) => (
-                  <TableRow key={c.id}>
-                    <TableCell>{c.name}</TableCell>
-                    <TableCell>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon-sm" aria-label="Actions">
-                            <MoreHorizontal />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => setCatDialog({ edit: c })}>
-                            Edit
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            variant="destructive"
-                            onSelect={(e) => {
-                              e.preventDefault()
-                              setDelCat(c.id)
-                            }}
-                          >
-                            Delete
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+      <ExpenseCategoryPieCard
+        data={data}
+        onManageCategories={() => setCategoriesManageOpen(true)}
+      />
+
+      <ExpenseCategoriesManageDialog
+        open={categoriesManageOpen}
+        onOpenChange={setCategoriesManageOpen}
+        categories={data.expenseCategories}
+        onAdd={() => setCatDialog("create")}
+        onRequestDelete={(id) => {
+          setCategoriesManageOpen(false)
+          setDelCat(id)
+        }}
+        refresh={refresh}
+      />
 
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <CardHeaderTitleRow
             title={<CardTitle>Expense lines</CardTitle>}
-            info="Planned uses recurring rules or a finalized snapshot; actual is from records. Native currencies per line (not converted to goal currency)."
+            info={
+              <>
+                Planned budgets are set on each category (see pie card). Lines are for detail: post actuals
+                here or use Import &amp; match transactions. Amounts stay in each line&apos;s native
+                currencies.
+              </>
+            }
           />
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="shrink-0"
+              onClick={() => setImportTxOpen(true)}
+            >
+              <FileSearch className="size-4" />
+              Import &amp; match
+            </Button>
+            <Button size="sm" variant="default" className="shrink-0" onClick={() => setLineDialog("create")}>
+              Add expense line
+            </Button>
+          </div>
         </CardHeader>
         <CardContent>
           <Table>
@@ -944,72 +1487,60 @@ function ExpensesTab({
               <TableRow>
                 <TableHead>Category</TableHead>
                 <TableHead>Line</TableHead>
-                <TableHead className="text-right">Planned</TableHead>
                 <TableHead className="text-right">Actual</TableHead>
-                <TableHead className="text-right">Variance</TableHead>
-                <TableHead className="w-12" />
+                <TableHead className="w-24 text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {data.expenseLines.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-muted-foreground h-16 text-center">
+                  <TableCell colSpan={4} className="text-muted-foreground h-16 text-center">
                     <span className="inline-flex items-center gap-1">
                       None yet
-                      <InfoTooltip>Add a category, then add lines from the toolbar.</InfoTooltip>
+                      <InfoTooltip>Add a category, then use the card header buttons above.</InfoTooltip>
                     </span>
                   </TableCell>
                 </TableRow>
               ) : (
                 data.expenseLines.map((el) => {
-                  const freq = parseBudgetFrequency(el.frequency)
-                  const planned = data.expensePlannedByLineNative[el.id]
                   const actual = data.expenseActualByLineNative[el.id]
                   return (
-                  <TableRow key={el.id}>
-                    <TableCell className="text-muted-foreground text-sm">{el.categoryName}</TableCell>
-                    <TableCell className="font-medium">
-                      <div>{el.name}</div>
-                      {el.isRecurring && freq ? (
-                        <div className="text-muted-foreground text-xs">
-                          Recurring · {BUDGET_FREQUENCY_LABELS[freq]}
+                    <TableRow key={el.id}>
+                      <TableCell className="text-muted-foreground text-sm">{el.categoryName}</TableCell>
+                      <TableCell className="font-medium">{el.name}</TableCell>
+                      <TableCell className="text-right">{formatNativeLineTotals(actual)}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center justify-end gap-0.5">
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button variant="ghost" size="icon-sm" aria-label="More actions">
+                                <MoreHorizontal />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem onClick={() => setRecLine(el)}>
+                                <ClipboardList className="size-4 opacity-70" />
+                                Records
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => setLineDialog({ edit: el })}>
+                                <Pencil className="size-4 opacity-70" />
+                                Edit
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                variant="destructive"
+                                onSelect={(e) => {
+                                  e.preventDefault()
+                                  setDelLine(el.id)
+                                }}
+                              >
+                                <Trash2 className="size-4 opacity-70" />
+                                Delete
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         </div>
-                      ) : null}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {formatNativeLineTotals(planned)}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {formatNativeLineTotals(actual)}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {formatNativeLineTotals(nativeVarianceBuckets(planned, actual))}
-                    </TableCell>
-                    <TableCell>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon-sm" aria-label="Actions">
-                            <MoreHorizontal />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => setRecLine(el)}>Records</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => setLineDialog({ edit: el })}>
-                            Edit
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            variant="destructive"
-                            onSelect={(e) => {
-                              e.preventDefault()
-                              setDelLine(el.id)
-                            }}
-                          >
-                            Delete
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </TableCell>
-                  </TableRow>
+                      </TableCell>
+                    </TableRow>
                   )
                 })
               )}
@@ -1017,6 +1548,20 @@ function ExpensesTab({
           </Table>
         </CardContent>
       </Card>
+
+      <Dialog open={importTxOpen} onOpenChange={setImportTxOpen}>
+        <DialogContent showCloseButton fullViewport>
+          <DialogHeader className="border-b px-4 py-3 pr-14 shrink-0 space-y-0 text-left">
+            <DialogTitle>Import &amp; match transactions</DialogTitle>
+            <p className="text-muted-foreground text-sm font-normal">
+              Budget month {data.ym} (UTC). Posted expense lines update actuals on this tab.
+            </p>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-6 pt-4">
+            <ImportTransactionsPanel data={data} refresh={refresh} />
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <ExpenseCategoryFormDialog
         open={catDialog !== null}
@@ -1104,6 +1649,15 @@ function ExpensesTab({
   )
 }
 
+type ExpenseCategoryFormValues = {
+  name: string
+  sortOrder: number
+  isRecurring: boolean
+  frequency: BudgetRecurringFrequency
+  recurringAmount: string
+  recurringCurrency: string
+}
+
 function ExpenseCategoryFormDialog({
   open,
   onOpenChange,
@@ -1112,23 +1666,54 @@ function ExpenseCategoryFormDialog({
 }: {
   open: boolean
   onOpenChange: (o: boolean) => void
-  category?: { id: string; name: string; sortOrder: number }
+  category?: BudgetData["expenseCategories"][number]
   onSaved: () => void
 }) {
   const isEdit = !!category
-  const form = useForm<{ name: string; sortOrder: number }>({
-    defaultValues: { name: category?.name ?? "", sortOrder: category?.sortOrder ?? 0 },
+  const form = useForm<ExpenseCategoryFormValues>({
+    defaultValues: {
+      name: "",
+      sortOrder: 0,
+      isRecurring: false,
+      frequency: "monthly",
+      recurringAmount: "",
+      recurringCurrency: "AED",
+    },
   })
+  const catIsRecurring = useWatch({ control: form.control, name: "isRecurring" })
 
   useEffect(() => {
     if (open) {
-      form.reset({ name: category?.name ?? "", sortOrder: category?.sortOrder ?? 0 })
+      const freq = parseBudgetFrequency(category?.frequency ?? null) ?? "monthly"
+      form.reset({
+        name: category?.name ?? "",
+        sortOrder: category?.sortOrder ?? 0,
+        isRecurring: category?.isRecurring ?? false,
+        frequency: freq,
+        recurringAmount:
+          category?.recurringAmount != null && category.recurringAmount !== ""
+            ? String(category.recurringAmount)
+            : "",
+        recurringCurrency: category?.recurringCurrency ?? "AED",
+      })
     }
   }, [open, category, form])
 
-  async function onSubmit(values: { name: string; sortOrder: number }) {
+  async function onSubmit(values: ExpenseCategoryFormValues) {
+    const parsedAmount =
+      values.isRecurring && values.recurringAmount.trim() !== ""
+        ? Number(values.recurringAmount)
+        : null
+    const body = {
+      name: values.name,
+      sortOrder: values.sortOrder,
+      isRecurring: values.isRecurring,
+      frequency: values.isRecurring ? values.frequency : null,
+      recurringAmount: parsedAmount,
+      recurringCurrency: values.isRecurring ? values.recurringCurrency : null,
+    }
     if (isEdit && category) {
-      const p = updateExpenseCategorySchema.safeParse({ ...values, id: category.id })
+      const p = updateExpenseCategorySchema.safeParse({ ...body, id: category.id })
       if (!p.success) {
         toast.error(p.error.issues.map((i) => i.message).join(" "))
         return
@@ -1140,7 +1725,7 @@ function ExpenseCategoryFormDialog({
         onSaved()
       } else toast.error(r.error)
     } else {
-      const p = expenseCategorySchema.safeParse(values)
+      const p = expenseCategorySchema.safeParse(body)
       if (!p.success) {
         toast.error(p.error.issues.map((i) => i.message).join(" "))
         return
@@ -1154,14 +1739,19 @@ function ExpenseCategoryFormDialog({
     }
   }
 
+  const catFormId = isEdit ? "budget-expense-cat-edit" : "budget-expense-cat-create"
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{isEdit ? "Edit category" : "New category"}</DialogTitle>
+      <DialogContent className="max-h-[90vh] overflow-y-auto">
+        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+          <DialogTitle className="min-w-0 flex-1 pr-8">{isEdit ? "Edit category" : "New category"}</DialogTitle>
+          <Button type="submit" form={catFormId} size="sm" className="shrink-0">
+            {isEdit ? "Save" : "Create"}
+          </Button>
         </DialogHeader>
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
+          <form id={catFormId} onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
             <FormField
               control={form.control}
               name="name"
@@ -1188,174 +1778,6 @@ function ExpenseCategoryFormDialog({
                 </FormItem>
               )}
             />
-            <DialogFooter>
-              <Button type="submit">{isEdit ? "Save" : "Create"}</Button>
-            </DialogFooter>
-          </form>
-        </Form>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-type ExpenseLineFormValues = {
-  categoryId: string
-  name: string
-  isRecurring: boolean
-  frequency: BudgetRecurringFrequency
-  recurringAmount: string
-  recurringCurrency: string
-  recurringAnchorDate: string
-}
-
-function ExpenseLineFormDialog({
-  open,
-  onOpenChange,
-  categories,
-  line,
-  onSaved,
-}: {
-  open: boolean
-  onOpenChange: (o: boolean) => void
-  categories: { id: string; name: string }[]
-  line?: BudgetData["expenseLines"][number]
-  onSaved: () => void
-}) {
-  const isEdit = !!line
-  const form = useForm<ExpenseLineFormValues>({
-    defaultValues: {
-      categoryId: line?.categoryId ?? categories[0]?.id ?? "",
-      name: "",
-      isRecurring: false,
-      frequency: "monthly",
-      recurringAmount: "",
-      recurringCurrency: "USD",
-      recurringAnchorDate: "",
-    },
-  })
-  const isRecurring = useWatch({ control: form.control, name: "isRecurring" })
-
-  useEffect(() => {
-    if (open) {
-      const freq = parseBudgetFrequency(line?.frequency ?? null) ?? "monthly"
-      form.reset({
-        categoryId: line?.categoryId ?? categories[0]?.id ?? "",
-        name: line?.name ?? "",
-        isRecurring: line?.isRecurring ?? false,
-        frequency: freq,
-        recurringAmount:
-          line?.recurringAmount != null && line.recurringAmount !== ""
-            ? String(line.recurringAmount)
-            : "",
-        recurringCurrency: line?.recurringCurrency ?? "USD",
-        recurringAnchorDate: normalizeRecurringAnchorDate(line?.recurringAnchorDate) ?? "",
-      })
-    }
-  }, [open, line, categories, form])
-
-  async function onSubmit(values: ExpenseLineFormValues) {
-    const parsedAmount =
-      values.isRecurring && values.recurringAmount.trim() !== ""
-        ? Number(values.recurringAmount)
-        : null
-    const anchorTrim = values.recurringAnchorDate.trim()
-    const body = {
-      categoryId: values.categoryId,
-      name: values.name,
-      isRecurring: values.isRecurring,
-      frequency: values.isRecurring ? values.frequency : null,
-      recurringAmount: parsedAmount,
-      recurringCurrency: values.isRecurring ? values.recurringCurrency : null,
-      recurringAnchorDate:
-        values.isRecurring && anchorTrim !== "" ? anchorTrim.slice(0, 10) : null,
-    }
-    if (isEdit && line) {
-      const p = updateExpenseLineSchema.safeParse({ ...body, id: line.id })
-      if (!p.success) {
-        toast.error(p.error.issues.map((i: { message: string }) => i.message).join(" "))
-        return
-      }
-      const r = await updateExpenseLine(p.data)
-      if (r.ok) {
-        toast.success("Line updated")
-        onOpenChange(false)
-        onSaved()
-      } else toast.error(r.error)
-    } else {
-      const p = expenseLineSchema.safeParse(body)
-      if (!p.success) {
-        toast.error(p.error.issues.map((i: { message: string }) => i.message).join(" "))
-        return
-      }
-      const r = await createExpenseLine(p.data)
-      if (r.ok) {
-        toast.success("Line created")
-        onOpenChange(false)
-        onSaved()
-      } else toast.error(r.error)
-    }
-  }
-
-  if (!isEdit && categories.length === 0) {
-    return (
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent>
-          <DialogHeader>
-            <div className="flex items-center gap-1.5">
-              <DialogTitle>Category required</DialogTitle>
-              <InfoTooltip>Add an expense category from the Expenses tab before creating a line.</InfoTooltip>
-            </div>
-          </DialogHeader>
-        </DialogContent>
-      </Dialog>
-    )
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{isEdit ? "Edit expense line" : "New expense line"}</DialogTitle>
-        </DialogHeader>
-        <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
-            <FormField
-              control={form.control}
-              name="categoryId"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Category</FormLabel>
-                  <Select onValueChange={field.onChange} value={field.value}>
-                    <FormControl>
-                      <SelectTrigger>
-                        <SelectValue placeholder="Category" />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      {categories.map((c) => (
-                        <SelectItem key={c.id} value={c.id}>
-                          {c.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name="name"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Line name</FormLabel>
-                  <FormControl>
-                    <Input {...field} />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
             <FormField
               control={form.control}
               name="isRecurring"
@@ -1369,11 +1791,17 @@ function ExpenseLineFormDialog({
                       onChange={(e) => field.onChange(e.target.checked)}
                     />
                   </FormControl>
-                  <FormLabel className="font-normal">Recurring budget</FormLabel>
+                  <div className="flex items-center gap-1">
+                    <FormLabel className="font-normal">Planned budget for this category</FormLabel>
+                    <InfoTooltip>
+                      Uses a smoothed monthly total from the schedule below (weekly/biweekly convert to an
+                      average month). Lines under this category only track actual spend.
+                    </InfoTooltip>
+                  </div>
                 </FormItem>
               )}
             />
-            {isRecurring ? (
+            {catIsRecurring ? (
               <>
                 <FormField
                   control={form.control}
@@ -1395,25 +1823,6 @@ function ExpenseLineFormDialog({
                           ))}
                         </SelectContent>
                       </Select>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name="recurringAnchorDate"
-                  render={({ field }) => (
-                    <FormItem>
-                      <div className="flex items-center gap-1">
-                        <FormLabel>Payment anchor (optional)</FormLabel>
-                        <InfoTooltip>
-                          Count this amount only in months when a payment falls on the schedule (e.g.
-                          quarterly bill). Leave empty to use a smoothed monthly average.
-                        </InfoTooltip>
-                      </div>
-                      <FormControl>
-                        <Input type="date" {...field} value={field.value || ""} />
-                      </FormControl>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -1457,9 +1866,147 @@ function ExpenseLineFormDialog({
                 />
               </>
             ) : null}
-            <DialogFooter>
-              <Button type="submit">{isEdit ? "Save" : "Create"}</Button>
-            </DialogFooter>
+          </form>
+        </Form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+type ExpenseLineFormValues = {
+  categoryId: string
+  name: string
+}
+
+function ExpenseLineFormDialog({
+  open,
+  onOpenChange,
+  categories,
+  line,
+  onSaved,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  categories: { id: string; name: string }[]
+  line?: BudgetData["expenseLines"][number]
+  onSaved: () => void
+}) {
+  const isEdit = !!line
+  const form = useForm<ExpenseLineFormValues>({
+    defaultValues: {
+      categoryId: line?.categoryId ?? categories[0]?.id ?? "",
+      name: "",
+    },
+  })
+
+  useEffect(() => {
+    if (open) {
+      form.reset({
+        categoryId: line?.categoryId ?? categories[0]?.id ?? "",
+        name: line?.name ?? "",
+      })
+    }
+  }, [open, line, categories, form])
+
+  async function onSubmit(values: ExpenseLineFormValues) {
+    const body = {
+      categoryId: values.categoryId,
+      name: values.name,
+    }
+    if (isEdit && line) {
+      const p = updateExpenseLineSchema.safeParse({ ...body, id: line.id })
+      if (!p.success) {
+        toast.error(p.error.issues.map((i: { message: string }) => i.message).join(" "))
+        return
+      }
+      const r = await updateExpenseLine(p.data)
+      if (r.ok) {
+        toast.success("Line updated")
+        onOpenChange(false)
+        onSaved()
+      } else toast.error(r.error)
+    } else {
+      const p = expenseLineSchema.safeParse(body)
+      if (!p.success) {
+        toast.error(p.error.issues.map((i: { message: string }) => i.message).join(" "))
+        return
+      }
+      const r = await createExpenseLine(p.data)
+      if (r.ok) {
+        toast.success("Line created")
+        onOpenChange(false)
+        onSaved()
+      } else toast.error(r.error)
+    }
+  }
+
+  if (!isEdit && categories.length === 0) {
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent>
+          <DialogHeader>
+            <div className="flex items-center gap-1.5">
+              <DialogTitle>Category required</DialogTitle>
+              <InfoTooltip>Add an expense category from the Expenses tab before creating a line.</InfoTooltip>
+            </div>
+          </DialogHeader>
+        </DialogContent>
+      </Dialog>
+    )
+  }
+
+  const expLineFormId = isEdit ? "budget-expense-line-edit" : "budget-expense-line-create"
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto">
+        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+          <DialogTitle className="min-w-0 flex-1 pr-8">
+            {isEdit ? "Edit expense line" : "New expense line"}
+          </DialogTitle>
+          <Button type="submit" form={expLineFormId} size="sm" className="shrink-0">
+            {isEdit ? "Save" : "Create"}
+          </Button>
+        </DialogHeader>
+        <Form {...form}>
+          <form id={expLineFormId} onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
+            <FormField
+              control={form.control}
+              name="categoryId"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Category</FormLabel>
+                  <Select onValueChange={field.onChange} value={field.value}>
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Category" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {categories.map((c) => (
+                        <SelectItem key={c.id} value={c.id}>
+                          {c.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="name"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Line name</FormLabel>
+                  <FormControl>
+                    <Input {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
           </form>
         </Form>
       </DialogContent>
@@ -1485,7 +2032,7 @@ function ExpenseRecordsDialog({
     defaultValues: {
       expenseLineId: line.id,
       amount: 0,
-      currency: "USD",
+      currency: "AED",
       occurredOn: new Date().toISOString().slice(0, 10),
     },
   })
@@ -1495,7 +2042,7 @@ function ExpenseRecordsDialog({
       addForm.reset({
         expenseLineId: line.id,
         amount: 0,
-        currency: "USD",
+        currency: "AED",
         occurredOn: new Date().toISOString().slice(0, 10),
       })
     }
@@ -1508,18 +2055,23 @@ function ExpenseRecordsDialog({
       addForm.reset({
         expenseLineId: line.id,
         amount: 0,
-        currency: "USD",
+        currency: "AED",
         occurredOn: new Date().toISOString().slice(0, 10),
       })
       onSaved()
     } else toast.error(r.error)
   }
 
+  const expRecordFormId = `budget-expense-record-${line.id}`
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>Records — {line.name}</DialogTitle>
+        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+          <DialogTitle className="min-w-0 flex-1 pr-8">Records — {line.name}</DialogTitle>
+          <Button type="submit" form={expRecordFormId} size="sm" className="shrink-0">
+            Add record
+          </Button>
         </DialogHeader>
         <Table>
           <TableHeader>
@@ -1541,7 +2093,7 @@ function ExpenseRecordsDialog({
                 <TableRow key={r.id}>
                   <TableCell className="font-mono text-xs">{r.occurredOn}</TableCell>
                   <TableCell className="text-right">
-                    {formatCurrency(Number(r.amount), r.currency ?? "USD")}
+                    {formatCurrency(Number(r.amount), r.currency ?? "AED")}
                   </TableCell>
                   <TableCell>
                     <Button
@@ -1565,7 +2117,11 @@ function ExpenseRecordsDialog({
           </TableBody>
         </Table>
         <Form {...addForm}>
-          <form onSubmit={addForm.handleSubmit(addRec)} className="flex flex-wrap gap-2 border-t pt-4">
+          <form
+            id={expRecordFormId}
+            onSubmit={addForm.handleSubmit(addRec)}
+            className="flex flex-wrap gap-2 border-t pt-4"
+          >
             <input type="hidden" {...addForm.register("expenseLineId")} />
             <FormField
               control={addForm.control}
@@ -1617,11 +2173,6 @@ function ExpenseRecordsDialog({
                 </FormItem>
               )}
             />
-            <div className="flex w-full items-end sm:w-auto">
-              <Button type="submit" size="sm">
-                Add record
-              </Button>
-            </div>
           </form>
         </Form>
       </DialogContent>

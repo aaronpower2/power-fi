@@ -57,6 +57,41 @@
       "when": 1774984000000,
       "tag": "0007_budget_plan_snapshots_expense_recurring",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1774985000000,
+      "tag": "0008_assets_meta",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1774986000000,
+      "tag": "0009_liabilities",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1774987000000,
+      "tag": "0010_goals_name",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1774988000000,
+      "tag": "0011_transaction_imports",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1774989000000,
+      "tag": "0012_category_budget_ledger",
+      "breakpoints": true
     }
   ]
 }

@@ -13,6 +13,7 @@ export const lifestyleLineInputSchema = z.object({
 })
 
 export const goalInputSchema = z.object({
+  name: z.string().trim().min(1, "Goal name required").max(256),
   currency: supportedCurrencySchema,
   fiDate: dateStr,
   withdrawalRatePercent: z.coerce

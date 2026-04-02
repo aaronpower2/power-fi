@@ -2,7 +2,7 @@
 
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useRouter } from "next/navigation"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useId, useMemo, useState } from "react"
 import {
   useForm,
   type Control,
@@ -12,35 +12,48 @@ import { toast } from "sonner"
 import type { z } from "zod"
 
 import {
+  createAllocationRecord,
   createAsset,
+  createLiability,
   createStrategy,
+  deleteAllocationRecord,
   deleteAllocationTarget,
   deleteAsset,
+  deleteLiability,
   deleteStrategy,
   setActiveStrategy,
   updateAsset,
+  updateLiability,
   updateStrategy,
   upsertAllocationTarget,
 } from "@/lib/actions/portfolio"
 import {
   allocationTargetSchema,
+  createAllocationRecordSchema,
   createAssetSchema,
+  createLiabilitySchema,
   createStrategySchema,
   strategyNameSchema,
   updateAssetSchema,
+  updateLiabilitySchema,
   updateStrategySchema,
   type UpdateAssetInput,
 } from "@/lib/validations/portfolio"
+import { parseAssetMeta } from "@/lib/types/asset-meta"
 import { SUPPORTED_CURRENCIES } from "@/lib/currency/iso4217"
-import { getPortfolioData } from "@/lib/data/portfolio"
+import {
+  getPortfolioData,
+  type PortfolioAllocationRecordRow,
+} from "@/lib/data/portfolio"
 import { formatCurrency } from "@/lib/format"
+import { cn } from "@/lib/utils"
 import { CardHeaderTitleRow, InfoTooltip } from "@/components/info-tooltip"
+import { PageHeader } from "@/components/page-header"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   Dialog,
   DialogContent,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -85,42 +98,301 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { MoreHorizontal } from "lucide-react"
+import { tabsListVariants } from "@/components/ui/tabs"
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts"
+import {
+  CheckCircle2,
+  ClipboardList,
+  ExternalLink,
+  MoreHorizontal,
+  Pencil,
+  PencilLine,
+  Plus,
+  Trash2,
+} from "lucide-react"
 
 type PortfolioPayload = Awaited<ReturnType<typeof getPortfolioData>>
 type AssetRow = PortfolioPayload["assets"][number]
+type LiabilityRow = PortfolioPayload["liabilities"][number]
 type CreateAssetForm = z.infer<typeof createAssetSchema>
+type CreateLiabilityForm = z.infer<typeof createLiabilitySchema>
+type UpdateLiabilityInput = z.infer<typeof updateLiabilitySchema>
+
+const portfolioTabTriggerCn =
+  "relative inline-flex h-[calc(100%-1px)] flex-1 items-center justify-center gap-1.5 rounded-md border border-transparent px-1.5 py-0.5 text-sm font-medium whitespace-nowrap transition-all focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
+
+function PortfolioSummaryCurrencySwitch({
+  summaryCurrency,
+  summaryCurrencyOptions,
+}: {
+  summaryCurrency: PortfolioPayload["summaryCurrency"]
+  summaryCurrencyOptions: PortfolioPayload["summaryCurrencyOptions"]
+}) {
+  const router = useRouter()
+  return (
+    <div
+      className="bg-muted/40 inline-flex rounded-lg border p-0.5"
+      role="group"
+      aria-label="Reporting currency for portfolio totals"
+    >
+      {summaryCurrencyOptions.map((ccy) => (
+        <Button
+          key={ccy}
+          type="button"
+          size="sm"
+          variant={summaryCurrency === ccy ? "secondary" : "ghost"}
+          className="h-7 min-w-12 px-2.5 text-xs font-medium"
+          onClick={() => router.push(`/portfolio?ccy=${ccy}`)}
+        >
+          {ccy}
+        </Button>
+      ))}
+    </div>
+  )
+}
 
 export function PortfolioManager({ data }: { data: PortfolioPayload }) {
   const router = useRouter()
   const refresh = () => router.refresh()
-  const { assets, strategies, activeStrategy, targets } = data
+  const {
+    assets,
+    liabilities,
+    strategies,
+    activeStrategy,
+    targets,
+    allocationRecordsByAssetId,
+    totalInvestedReporting,
+    currentPositionReporting,
+    totalLiabilitiesReporting,
+    netPositionReporting,
+    yearlyProjectedReporting,
+    summaryCurrency,
+    summaryCurrencyOptions,
+    goalReportingCurrency,
+    fiDateLabel,
+    portfolioFxWarning,
+    fxAsOfDate,
+  } = data
 
   const targetSum = useMemo(
     () => targets.reduce((s, t) => s + Number(t.weightPercent), 0),
     [targets],
   )
 
+  const [mainTab, setMainTab] = useState("assets")
   const [pendingDeleteAsset, setPendingDeleteAsset] = useState<string | null>(null)
   const [pendingDeleteStrategy, setPendingDeleteStrategy] = useState<string | null>(null)
   const [assetToEdit, setAssetToEdit] = useState<AssetRow | null>(null)
+  const [assetForRecords, setAssetForRecords] = useState<AssetRow | null>(null)
   const [strategyToRename, setStrategyToRename] = useState<{
     id: string
     name: string
   } | null>(null)
+  const [liabilityToEdit, setLiabilityToEdit] = useState<LiabilityRow | null>(null)
+  const [pendingDeleteLiability, setPendingDeleteLiability] = useState<string | null>(null)
+
+  const reportingCcy = goalReportingCurrency ?? summaryCurrency
+  const tabBaseId = useId()
+  const panelAssetsId = `${tabBaseId}-panel-assets`
+  const panelLiabilitiesId = `${tabBaseId}-panel-liabilities`
+  const panelStrategyId = `${tabBaseId}-panel-strategy`
+  const triggerAssetsId = `${tabBaseId}-trigger-assets`
+  const triggerLiabilitiesId = `${tabBaseId}-trigger-liabilities`
+  const triggerStrategyId = `${tabBaseId}-trigger-strategy`
 
   return (
-    <Tabs defaultValue="assets" className="w-full">
-      <TabsList>
-        <TabsTrigger value="assets">Assets</TabsTrigger>
-        <TabsTrigger value="strategy">Strategy</TabsTrigger>
-      </TabsList>
+    <div
+      data-slot="tabs"
+      data-orientation="horizontal"
+      className="group/tabs flex w-full flex-col gap-8"
+    >
+      <PageHeader
+        title="Portfolio"
+        description="Assets by type and growth model. Strategy splits drive how investable capital is allocated each month."
+        controls={
+          <div className="flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div
+              role="tablist"
+              aria-orientation="horizontal"
+              data-slot="tabs-list"
+              data-variant="default"
+              className={tabsListVariants({ variant: "default" })}
+            >
+              <button
+                type="button"
+                role="tab"
+                id={triggerAssetsId}
+                aria-selected={mainTab === "assets"}
+                aria-controls={panelAssetsId}
+                tabIndex={mainTab === "assets" ? 0 : -1}
+                data-slot="tabs-trigger"
+                onClick={() => setMainTab("assets")}
+                className={cn(
+                  portfolioTabTriggerCn,
+                  mainTab === "assets"
+                    ? "bg-background text-foreground shadow-sm dark:border-input dark:bg-input/30 dark:text-foreground"
+                    : "text-foreground/60 hover:text-foreground dark:text-muted-foreground dark:hover:text-foreground",
+                )}
+              >
+                Assets
+              </button>
+              <button
+                type="button"
+                role="tab"
+                id={triggerLiabilitiesId}
+                aria-selected={mainTab === "liabilities"}
+                aria-controls={panelLiabilitiesId}
+                tabIndex={mainTab === "liabilities" ? 0 : -1}
+                data-slot="tabs-trigger"
+                onClick={() => setMainTab("liabilities")}
+                className={cn(
+                  portfolioTabTriggerCn,
+                  mainTab === "liabilities"
+                    ? "bg-background text-foreground shadow-sm dark:border-input dark:bg-input/30 dark:text-foreground"
+                    : "text-foreground/60 hover:text-foreground dark:text-muted-foreground dark:hover:text-foreground",
+                )}
+              >
+                Liabilities
+              </button>
+              <button
+                type="button"
+                role="tab"
+                id={triggerStrategyId}
+                aria-selected={mainTab === "strategy"}
+                aria-controls={panelStrategyId}
+                tabIndex={mainTab === "strategy" ? 0 : -1}
+                data-slot="tabs-trigger"
+                onClick={() => setMainTab("strategy")}
+                className={cn(
+                  portfolioTabTriggerCn,
+                  mainTab === "strategy"
+                    ? "bg-background text-foreground shadow-sm dark:border-input dark:bg-input/30 dark:text-foreground"
+                    : "text-foreground/60 hover:text-foreground dark:text-muted-foreground dark:hover:text-foreground",
+                )}
+              >
+                Strategy
+              </button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+              <PortfolioSummaryCurrencySwitch
+                summaryCurrency={summaryCurrency}
+                summaryCurrencyOptions={summaryCurrencyOptions}
+              />
+              {mainTab === "assets" ? <AddAssetDialog onSaved={refresh} /> : null}
+              {mainTab === "liabilities" ? (
+                <AddLiabilityDialog assets={assets} onSaved={refresh} />
+              ) : null}
+              {mainTab === "strategy" ? <StrategyCreateDialog onCreated={refresh} /> : null}
+            </div>
+          </div>
+        }
+      />
 
-      <TabsContent value="assets" className="mt-4 space-y-4">
-        <div className="flex justify-end">
-          <AddAssetDialog onSaved={refresh} />
+      {portfolioFxWarning ? (
+        <p className="text-muted-foreground border-border bg-muted/40 rounded-lg border px-3 py-2 text-sm">
+          {portfolioFxWarning}
+        </p>
+      ) : null}
+
+      <div className="flex flex-col gap-6">
+        <div className="grid w-full min-w-0 grid-cols-2 gap-3 md:grid-cols-4">
+          <Card className="min-w-0">
+            <CardHeader className="gap-0 pb-1 pt-3">
+              <CardTitle className="text-sm font-medium leading-tight">Total invested</CardTitle>
+              <p className="text-muted-foreground line-clamp-2 text-[11px] leading-snug">
+                Allocation records{goalReportingCurrency ? ` · ${goalReportingCurrency}` : ""}
+              </p>
+            </CardHeader>
+            <CardContent className="pb-3 pt-0">
+              <p className="font-heading text-lg font-semibold tabular-nums sm:text-xl md:text-2xl">
+                {totalInvestedReporting != null
+                  ? formatCurrency(totalInvestedReporting, reportingCcy)
+                  : "—"}
+              </p>
+            </CardContent>
+          </Card>
+          <Card className="min-w-0">
+            <CardHeader className="gap-0 pb-1 pt-3">
+              <CardTitle className="text-sm font-medium leading-tight">Gross position</CardTitle>
+              <p className="text-muted-foreground line-clamp-2 text-[11px] leading-snug">
+                Assets only · {summaryCurrency}
+              </p>
+            </CardHeader>
+            <CardContent className="pb-3 pt-0">
+              <p className="font-heading text-lg font-semibold tabular-nums sm:text-xl md:text-2xl">
+                {currentPositionReporting != null
+                  ? formatCurrency(currentPositionReporting, reportingCcy)
+                  : "—"}
+              </p>
+            </CardContent>
+          </Card>
+          <Card className="min-w-0">
+            <CardHeader className="gap-0 pb-1 pt-3">
+              <CardTitle className="text-sm font-medium leading-tight">Total liabilities</CardTitle>
+              <p className="text-muted-foreground line-clamp-2 text-[11px] leading-snug">
+                Principal owed
+              </p>
+            </CardHeader>
+            <CardContent className="pb-3 pt-0">
+              <p className="font-heading text-lg font-semibold tabular-nums sm:text-xl md:text-2xl">
+                {totalLiabilitiesReporting != null
+                  ? formatCurrency(totalLiabilitiesReporting, reportingCcy)
+                  : "—"}
+              </p>
+            </CardContent>
+          </Card>
+          <Card className="min-w-0">
+            <CardHeader className="gap-0 pb-1 pt-3">
+              <CardTitle className="text-sm font-medium leading-tight">Net position</CardTitle>
+              <p className="text-muted-foreground line-clamp-2 text-[11px] leading-snug">
+                Assets − liabilities
+              </p>
+            </CardHeader>
+            <CardContent className="pb-3 pt-0">
+              <p className="font-heading text-lg font-semibold tabular-nums sm:text-xl md:text-2xl">
+                {netPositionReporting != null
+                  ? formatCurrency(netPositionReporting, reportingCcy)
+                  : "—"}
+              </p>
+            </CardContent>
+          </Card>
         </div>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base font-medium">Projected total by year</CardTitle>
+            <p className="text-muted-foreground text-xs">
+              Net of liabilities (debt held flat); gross asset model through FI
+              {fiDateLabel ? ` (${fiDateLabel})` : ""}
+              {fxAsOfDate ? ` · FX ${fxAsOfDate}` : ""}
+            </p>
+          </CardHeader>
+          <CardContent>
+            <PortfolioYearlyBarChart
+              data={yearlyProjectedReporting}
+              currencyCode={reportingCcy}
+            />
+          </CardContent>
+        </Card>
+      </div>
+
+      <div
+        role="tabpanel"
+        id={panelAssetsId}
+        aria-labelledby={triggerAssetsId}
+        hidden={mainTab !== "assets"}
+        tabIndex={0}
+        data-slot="tabs-content"
+        className="mt-0 flex-1 space-y-4 text-sm outline-none"
+      >
         <EditAssetDialog
           asset={assetToEdit}
           open={!!assetToEdit}
@@ -132,11 +404,22 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
             refresh()
           }}
         />
+        {assetForRecords ? (
+          <AllocationRecordsDialog
+            asset={assetForRecords}
+            records={allocationRecordsByAssetId[assetForRecords.id] ?? []}
+            open={!!assetForRecords}
+            onOpenChange={(o) => {
+              if (!o) setAssetForRecords(null)
+            }}
+            onSaved={refresh}
+          />
+        ) : null}
         <Card>
           <CardHeader>
             <CardHeaderTitleRow
               title={<CardTitle>Assets</CardTitle>}
-              info="Compound growth uses an annual return (%). Capital growth uses a terminal value and maturation date."
+              info="Compound growth uses an annual return (%). Capital growth uses a terminal value and maturation date. Allocation records track capital you add to each line (like budget line records). Realized market performance is not auto-imported: edit the asset and update Current balance when you reconcile, or plan periodic snapshots if we add a dedicated valuation history later."
             />
           </CardHeader>
           <CardContent>
@@ -147,29 +430,173 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                   <TableHead>Type</TableHead>
                   <TableHead>CCY</TableHead>
                   <TableHead>Growth</TableHead>
+                  <TableHead className="text-right">Allocated</TableHead>
                   <TableHead className="text-right">Balance</TableHead>
                   <TableHead className="w-12" />
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {assets.length === 0 ? (
-                    <TableRow>
-                    <TableCell colSpan={6} className="text-muted-foreground h-20 text-center">
+                  <TableRow>
+                    <TableCell colSpan={7} className="text-muted-foreground h-20 text-center">
                       No assets yet.
                     </TableCell>
                   </TableRow>
                 ) : (
-                  assets.map((a) => (
-                    <TableRow key={a.id}>
-                      <TableCell className="font-medium">{a.name}</TableCell>
-                      <TableCell>{a.assetType}</TableCell>
-                      <TableCell className="font-mono text-xs">{a.currency ?? "USD"}</TableCell>
-                      <TableCell className="capitalize">{a.growthType}</TableCell>
+                  assets.map((a) => {
+                    const recs = allocationRecordsByAssetId[a.id] ?? []
+                    const allocated = recs.reduce((s, r) => s + Number(r.amount), 0)
+                    const link = parseAssetMeta(a.meta).linkToManage
+                    return (
+                      <TableRow key={a.id}>
+                        <TableCell className="font-medium">
+                          <div
+                            className="flex items-center gap-1.5"
+                            title={link?.credentialsHint || undefined}
+                          >
+                            <span>{a.name}</span>
+                            {link?.url ? (
+                              <a
+                                href={link.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-muted-foreground hover:text-foreground inline-flex shrink-0"
+                                aria-label={
+                                  link.label
+                                    ? `Open ${link.label}`
+                                    : "Open link to manage"
+                                }
+                                title={link.label ?? "Manage externally"}
+                              >
+                                <ExternalLink className="size-3.5" />
+                              </a>
+                            ) : null}
+                          </div>
+                          {link?.label && !link.url ? (
+                            <div className="text-muted-foreground mt-0.5 text-xs">{link.label}</div>
+                          ) : null}
+                        </TableCell>
+                        <TableCell>{a.assetType}</TableCell>
+                        <TableCell className="font-mono text-xs">{a.currency ?? "USD"}</TableCell>
+                        <TableCell className="capitalize">{a.growthType}</TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {formatCurrency(allocated, a.currency ?? "USD")}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {formatCurrency(
+                            Number(a.currentBalance),
+                            a.currency ?? "USD",
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button variant="ghost" size="icon-sm" aria-label="Actions">
+                                <MoreHorizontal />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem
+                                onSelect={(e) => {
+                                  e.preventDefault()
+                                  setAssetForRecords(a)
+                                }}
+                              >
+                                <ClipboardList className="size-4 opacity-70" />
+                                Records
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onSelect={(e) => {
+                                  e.preventDefault()
+                                  setAssetToEdit(a)
+                                }}
+                              >
+                                <Pencil className="size-4 opacity-70" />
+                                Edit
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                variant="destructive"
+                                onSelect={(e) => {
+                                  e.preventDefault()
+                                  setPendingDeleteAsset(a.id)
+                                }}
+                              >
+                                <Trash2 className="size-4 opacity-70" />
+                                Delete
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div
+        role="tabpanel"
+        id={panelLiabilitiesId}
+        aria-labelledby={triggerLiabilitiesId}
+        hidden={mainTab !== "liabilities"}
+        tabIndex={0}
+        data-slot="tabs-content"
+        className="mt-0 flex-1 space-y-4 text-sm outline-none"
+      >
+        <EditLiabilityDialog
+          liability={liabilityToEdit}
+          assets={assets}
+          open={!!liabilityToEdit}
+          onOpenChange={(o) => {
+            if (!o) setLiabilityToEdit(null)
+          }}
+          onSaved={() => {
+            setLiabilityToEdit(null)
+            refresh()
+          }}
+        />
+        <Card>
+          <CardHeader>
+            <CardHeaderTitleRow
+              title={<CardTitle>Liabilities</CardTitle>}
+              info="Principal owed (positive balance). Optional link to a securing asset for reference. Debt is treated as flat in projections (today’s total subtracted each month). Cash interest/principal payments belong in Budget."
+            />
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead>CCY</TableHead>
+                  <TableHead className="text-right">Balance</TableHead>
+                  <TableHead>Secured by</TableHead>
+                  <TableHead className="w-12" />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {liabilities.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={6} className="text-muted-foreground h-20 text-center">
+                      No liabilities yet.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  liabilities.map((row) => (
+                    <TableRow key={row.id}>
+                      <TableCell className="font-medium">{row.name}</TableCell>
+                      <TableCell className="text-muted-foreground text-sm">
+                        {row.liabilityType ?? "—"}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">{row.currency ?? "USD"}</TableCell>
                       <TableCell className="text-right tabular-nums">
-                        {formatCurrency(
-                          Number(a.currentBalance),
-                          a.currency ?? "USD",
-                        )}
+                        {formatCurrency(Number(row.currentBalance), row.currency ?? "USD")}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground text-sm">
+                        {row.securedByAssetName ?? "—"}
                       </TableCell>
                       <TableCell>
                         <DropdownMenu>
@@ -182,18 +609,20 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                             <DropdownMenuItem
                               onSelect={(e) => {
                                 e.preventDefault()
-                                setAssetToEdit(a)
+                                setLiabilityToEdit(row)
                               }}
                             >
+                              <Pencil className="size-4 opacity-70" />
                               Edit
                             </DropdownMenuItem>
                             <DropdownMenuItem
                               variant="destructive"
                               onSelect={(e) => {
                                 e.preventDefault()
-                                setPendingDeleteAsset(a.id)
+                                setPendingDeleteLiability(row.id)
                               }}
                             >
+                              <Trash2 className="size-4 opacity-70" />
                               Delete
                             </DropdownMenuItem>
                           </DropdownMenuContent>
@@ -206,9 +635,17 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
             </Table>
           </CardContent>
         </Card>
-      </TabsContent>
+      </div>
 
-      <TabsContent value="strategy" className="mt-4 space-y-6">
+      <div
+        role="tabpanel"
+        id={panelStrategyId}
+        aria-labelledby={triggerStrategyId}
+        hidden={mainTab !== "strategy"}
+        tabIndex={0}
+        data-slot="tabs-content"
+        className="mt-0 flex-1 space-y-6 text-sm outline-none"
+      >
         <RenameStrategyDialog
           strategy={strategyToRename}
           open={!!strategyToRename}
@@ -220,9 +657,6 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
             refresh()
           }}
         />
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <StrategyCreateDialog onCreated={refresh} />
-        </div>
         <Card>
           <CardHeader>
             <CardHeaderTitleRow
@@ -269,6 +703,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                                   } else toast.error(r.error)
                                 }}
                               >
+                                <CheckCircle2 className="size-4 opacity-70" />
                                 Set active
                               </DropdownMenuItem>
                             ) : null}
@@ -278,6 +713,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                                 setStrategyToRename({ id: s.id, name: s.name })
                               }}
                             >
+                              <PencilLine className="size-4 opacity-70" />
                               Rename
                             </DropdownMenuItem>
                             <DropdownMenuItem
@@ -287,6 +723,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                                 setPendingDeleteStrategy(s.id)
                               }}
                             >
+                              <Trash2 className="size-4 opacity-70" />
                               Delete
                             </DropdownMenuItem>
                           </DropdownMenuContent>
@@ -377,7 +814,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
             )}
           </CardContent>
         </Card>
-      </TabsContent>
+      </div>
 
       <AlertDialog
         open={!!pendingDeleteAsset}
@@ -444,11 +881,344 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </Tabs>
+
+      <AlertDialog
+        open={!!pendingDeleteLiability}
+        onOpenChange={(o) => {
+          if (!o) setPendingDeleteLiability(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete liability?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Removes this liability row. Securing links are cleared. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={async () => {
+                if (!pendingDeleteLiability) return
+                const r = await deleteLiability(pendingDeleteLiability)
+                setPendingDeleteLiability(null)
+                if (r.ok) {
+                  toast.success("Liability deleted")
+                  refresh()
+                } else toast.error(r.error)
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  )
+}
+
+function PortfolioYearlyBarChart({
+  data,
+  currencyCode,
+}: {
+  data: { year: number; projectedTotal: number }[]
+  currencyCode: string
+}) {
+  if (data.length === 0) {
+    return <p className="text-muted-foreground text-sm">—</p>
+  }
+
+  const chartData = data.map((d) => ({
+    year: String(d.year),
+    total: d.projectedTotal,
+  }))
+
+  return (
+    <div className="text-foreground h-[280px] w-full sm:h-[300px]">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={chartData} margin={{ top: 8, right: 12, left: 4, bottom: 8 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+          <XAxis
+            dataKey="year"
+            tick={{ fontSize: 11 }}
+            tickLine={false}
+            axisLine={false}
+          />
+          <YAxis
+            tick={{ fontSize: 11 }}
+            tickLine={false}
+            axisLine={false}
+            tickFormatter={(v) =>
+              v >= 1_000_000 ? `${Math.round(v / 1_000_000)}M` : `${Math.round(v / 1000)}k`
+            }
+          />
+          <Tooltip
+            contentStyle={{
+              borderRadius: "var(--radius-md)",
+              border: "1px solid var(--border)",
+              background: "var(--card)",
+            }}
+            formatter={(value) => [
+              formatCurrency(
+                typeof value === "number" ? value : Number(value),
+                currencyCode,
+                { maximumFractionDigits: 0 },
+              ),
+              "Projected",
+            ]}
+            labelFormatter={(label) => `Year ${label}`}
+          />
+          <Bar
+            dataKey="total"
+            fill="var(--primary)"
+            radius={[4, 4, 0, 0]}
+            name="Projected"
+          />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+function liabilityToFormValues(row: LiabilityRow): UpdateLiabilityInput {
+  return {
+    id: row.id,
+    name: row.name,
+    liabilityType: row.liabilityType ?? "",
+    currency: (row.currency ?? "USD") as UpdateLiabilityInput["currency"],
+    currentBalance: Number(row.currentBalance),
+    securedByAssetId: row.securedByAssetId ?? "",
+  }
+}
+
+function LiabilityFormFields({
+  control,
+  assets,
+}: {
+  control: Control<FieldValues>
+  assets: AssetRow[]
+}) {
+  return (
+    <>
+      <FormField
+        control={control}
+        name="name"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Name</FormLabel>
+            <FormControl>
+              <Input {...field} />
+            </FormControl>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+      <FormField
+        control={control}
+        name="liabilityType"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Type</FormLabel>
+            <FormControl>
+              <Input placeholder="Mortgage, margin, loan…" {...field} value={field.value ?? ""} />
+            </FormControl>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+      <FormField
+        control={control}
+        name="currency"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Currency</FormLabel>
+            <Select onValueChange={field.onChange} value={field.value}>
+              <FormControl>
+                <SelectTrigger>
+                  <SelectValue placeholder="CCY" />
+                </SelectTrigger>
+              </FormControl>
+              <SelectContent>
+                {SUPPORTED_CURRENCIES.map((c) => (
+                  <SelectItem key={c} value={c}>
+                    {c}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+      <FormField
+        control={control}
+        name="currentBalance"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Principal owed</FormLabel>
+            <FormControl>
+              <Input type="number" step="1" min={0} {...field} />
+            </FormControl>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+      <FormField
+        control={control}
+        name="securedByAssetId"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Secured by asset</FormLabel>
+            <Select
+              onValueChange={(v) => field.onChange(v === "__none__" ? "" : v)}
+              value={field.value && field.value !== "" ? field.value : "__none__"}
+            >
+              <FormControl>
+                <SelectTrigger>
+                  <SelectValue placeholder="None" />
+                </SelectTrigger>
+              </FormControl>
+              <SelectContent>
+                <SelectItem value="__none__">None</SelectItem>
+                {assets.map((a) => (
+                  <SelectItem key={a.id} value={a.id}>
+                    {a.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+    </>
+  )
+}
+
+function AddLiabilityDialog({
+  assets,
+  onSaved,
+}: {
+  assets: AssetRow[]
+  onSaved: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const form = useForm<CreateLiabilityForm>({
+    resolver: zodResolver(createLiabilitySchema),
+    defaultValues: {
+      name: "",
+      liabilityType: "",
+      currency: "USD",
+      currentBalance: 0,
+      securedByAssetId: "",
+    },
+  })
+
+  async function onSubmit(values: CreateLiabilityForm) {
+    const r = await createLiability(values)
+    if (r.ok) {
+      toast.success("Liability created")
+      setOpen(false)
+      form.reset({
+        name: "",
+        liabilityType: "",
+        currency: "USD",
+        currentBalance: 0,
+        securedByAssetId: "",
+      })
+      onSaved()
+    } else toast.error(r.error)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button size="sm" className="gap-1.5">
+          <Plus className="size-4 shrink-0" aria-hidden />
+          Add liability
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
+        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+          <DialogTitle className="min-w-0 flex-1 pr-8">New liability</DialogTitle>
+          <Button type="submit" form="portfolio-liability-create" size="sm" className="shrink-0">
+            Create
+          </Button>
+        </DialogHeader>
+        <Form {...form}>
+          <form id="portfolio-liability-create" onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
+            <LiabilityFormFields
+              control={form.control as unknown as Control<FieldValues>}
+              assets={assets}
+            />
+          </form>
+        </Form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function EditLiabilityDialog({
+  liability,
+  assets,
+  open,
+  onOpenChange,
+  onSaved,
+}: {
+  liability: LiabilityRow | null
+  assets: AssetRow[]
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onSaved: () => void
+}) {
+  const form = useForm<UpdateLiabilityInput>({
+    resolver: zodResolver(updateLiabilitySchema),
+    defaultValues: liability ? liabilityToFormValues(liability) : undefined,
+  })
+
+  useEffect(() => {
+    if (liability && open) {
+      form.reset(liabilityToFormValues(liability))
+    }
+  }, [liability, open, form])
+
+  async function onSubmit(values: UpdateLiabilityInput) {
+    const r = await updateLiability(values)
+    if (r.ok) {
+      toast.success("Liability updated")
+      onOpenChange(false)
+      onSaved()
+    } else toast.error(r.error)
+  }
+
+  if (!liability) return null
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
+        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+          <DialogTitle className="min-w-0 flex-1 pr-8">Edit liability</DialogTitle>
+          <Button type="submit" form="portfolio-liability-edit" size="sm" className="shrink-0">
+            Save
+          </Button>
+        </DialogHeader>
+        <Form {...form}>
+          <form id="portfolio-liability-edit" onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
+            <input type="hidden" {...form.register("id")} />
+            <LiabilityFormFields
+              control={form.control as unknown as Control<FieldValues>}
+              assets={assets}
+            />
+          </form>
+        </Form>
+      </DialogContent>
+    </Dialog>
   )
 }
 
 function assetToFormValues(asset: AssetRow): UpdateAssetInput {
+  const m = parseAssetMeta(asset.meta)
   return {
     id: asset.id,
     name: asset.name,
@@ -463,7 +1233,159 @@ function assetToFormValues(asset: AssetRow): UpdateAssetInput {
       : undefined,
     maturationDate: asset.maturationDate ?? undefined,
     currentBalance: Number(asset.currentBalance),
+    meta: {
+      linkToManage: {
+        url: m.linkToManage?.url ?? "",
+        label: m.linkToManage?.label ?? "",
+        credentialsHint: m.linkToManage?.credentialsHint ?? "",
+      },
+    },
   }
+}
+
+function AllocationRecordsDialog({
+  asset,
+  records,
+  open,
+  onOpenChange,
+  onSaved,
+}: {
+  asset: AssetRow
+  records: PortfolioAllocationRecordRow[]
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  onSaved: () => void
+}) {
+  const ccy = asset.currency ?? "USD"
+  const addForm = useForm<z.infer<typeof createAllocationRecordSchema>>({
+    resolver: zodResolver(createAllocationRecordSchema),
+    defaultValues: {
+      assetId: asset.id,
+      amount: 0,
+      allocatedOn: new Date().toISOString().slice(0, 10),
+    },
+  })
+
+  useEffect(() => {
+    if (open) {
+      addForm.reset({
+        assetId: asset.id,
+        amount: 0,
+        allocatedOn: new Date().toISOString().slice(0, 10),
+      })
+    }
+  }, [open, asset.id, addForm])
+
+  async function addRec(values: z.infer<typeof createAllocationRecordSchema>) {
+    const r = await createAllocationRecord({ ...values, assetId: asset.id })
+    if (r.ok) {
+      toast.success("Record added")
+      addForm.reset({
+        assetId: asset.id,
+        amount: 0,
+        allocatedOn: new Date().toISOString().slice(0, 10),
+      })
+      onSaved()
+    } else toast.error(r.error)
+  }
+
+  const allocRecordFormId = `portfolio-alloc-record-${asset.id}`
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+        <DialogHeader className="flex flex-row flex-wrap items-start justify-between gap-2 space-y-0">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 pr-8">
+            <DialogTitle>Allocation records — {asset.name}</DialogTitle>
+            <InfoTooltip>
+              Log capital you move into this asset (contributions). Amounts are in the asset’s currency.
+            </InfoTooltip>
+          </div>
+          <Button type="submit" form={allocRecordFormId} size="sm" className="shrink-0">
+            Add record
+          </Button>
+        </DialogHeader>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Date</TableHead>
+              <TableHead className="text-right">Amount</TableHead>
+              <TableHead className="w-20" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {records.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={3} className="text-muted-foreground h-14 text-center">
+                  No records.
+                </TableCell>
+              </TableRow>
+            ) : (
+              records.map((r) => (
+                <TableRow key={r.id}>
+                  <TableCell className="font-mono text-xs">{r.allocatedOn}</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {formatCurrency(Number(r.amount), ccy)}
+                  </TableCell>
+                  <TableCell>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive"
+                      onClick={async () => {
+                        const res = await deleteAllocationRecord(r.id)
+                        if (res.ok) {
+                          toast.success("Removed")
+                          onSaved()
+                        } else toast.error(res.error)
+                      }}
+                    >
+                      Delete
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+        <Form {...addForm}>
+          <form
+            id={allocRecordFormId}
+            onSubmit={addForm.handleSubmit(addRec)}
+            className="flex flex-wrap gap-2 border-t pt-4"
+          >
+            <input type="hidden" {...addForm.register("assetId")} />
+            <FormField
+              control={addForm.control}
+              name="amount"
+              render={({ field }) => (
+                <FormItem className="min-w-[100px] flex-1">
+                  <FormLabel>Amount</FormLabel>
+                  <FormControl>
+                    <Input type="number" step="0.01" min={0} {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={addForm.control}
+              name="allocatedOn"
+              render={({ field }) => (
+                <FormItem className="min-w-[140px]">
+                  <FormLabel>Date</FormLabel>
+                  <FormControl>
+                    <Input type="date" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </form>
+        </Form>
+      </DialogContent>
+    </Dialog>
+  )
 }
 
 function AddAssetDialog({ onSaved }: { onSaved: () => void }) {
@@ -477,6 +1399,9 @@ function AddAssetDialog({ onSaved }: { onSaved: () => void }) {
       growthType: "compound",
       assumedAnnualReturnPercent: 7,
       currentBalance: 0,
+      meta: {
+        linkToManage: { url: "", label: "", credentialsHint: "" },
+      },
     },
   })
   const growthType = form.watch("growthType")
@@ -493,6 +1418,9 @@ function AddAssetDialog({ onSaved }: { onSaved: () => void }) {
         growthType: "compound",
         assumedAnnualReturnPercent: 7,
         currentBalance: 0,
+        meta: {
+          linkToManage: { url: "", label: "", credentialsHint: "" },
+        },
       })
       onSaved()
     } else toast.error(r.error)
@@ -501,24 +1429,27 @@ function AddAssetDialog({ onSaved }: { onSaved: () => void }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button size="sm">Add asset</Button>
+        <Button size="sm" className="gap-1.5">
+          <Plus className="size-4 shrink-0" aria-hidden />
+          Add asset
+        </Button>
       </DialogTrigger>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
-        <DialogHeader>
-          <div className="flex items-center gap-1.5 pr-8">
+        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 pr-8">
             <DialogTitle>New asset</DialogTitle>
             <InfoTooltip>Balances and assumptions feed the projection engine.</InfoTooltip>
           </div>
+          <Button type="submit" form="portfolio-asset-create" size="sm" className="shrink-0">
+            Create
+          </Button>
         </DialogHeader>
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
+          <form id="portfolio-asset-create" onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
             <AssetFormFields
               control={form.control as unknown as Control<FieldValues>}
               growthType={growthType}
             />
-            <DialogFooter>
-              <Button type="submit">Create</Button>
-            </DialogFooter>
           </form>
         </Form>
       </DialogContent>
@@ -563,22 +1494,22 @@ function EditAssetDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
-        <DialogHeader>
-          <div className="flex items-center gap-1.5 pr-8">
+        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 pr-8">
             <DialogTitle>Edit asset</DialogTitle>
             <InfoTooltip>Balances and assumptions feed the projection engine.</InfoTooltip>
           </div>
+          <Button type="submit" form="portfolio-asset-edit" size="sm" className="shrink-0">
+            Save
+          </Button>
         </DialogHeader>
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
+          <form id="portfolio-asset-edit" onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
             <input type="hidden" {...form.register("id")} />
             <AssetFormFields
               control={form.control as unknown as Control<FieldValues>}
               growthType={growthType}
             />
-            <DialogFooter>
-              <Button type="submit">Save</Button>
-            </DialogFooter>
           </form>
         </Form>
       </DialogContent>
@@ -724,6 +1655,67 @@ function AssetFormFields({
           </FormItem>
         )}
       />
+      <div className="space-y-3 border-t pt-3">
+        <p className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+          Link to manage
+        </p>
+        <p className="text-muted-foreground text-xs">
+          Optional pointer to the broker or app and a credentials hint (stored in your database — use
+          references, not secrets).
+        </p>
+        <FormField
+          control={control}
+          name="meta.linkToManage.label"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Platform label</FormLabel>
+              <FormControl>
+                <Input placeholder="e.g. Interactive Brokers" {...field} value={field.value ?? ""} />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+        <FormField
+          control={control}
+          name="meta.linkToManage.url"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>URL</FormLabel>
+              <FormControl>
+                <Input
+                  type="text"
+                  inputMode="url"
+                  placeholder="https://…"
+                  {...field}
+                  value={field.value ?? ""}
+                />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+        <FormField
+          control={control}
+          name="meta.linkToManage.credentialsHint"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Credentials hint</FormLabel>
+              <FormControl>
+                <textarea
+                  {...field}
+                  value={field.value ?? ""}
+                  rows={3}
+                  className={cn(
+                    "border-input bg-transparent placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 dark:bg-input/30 flex w-full rounded-lg border px-2.5 py-2 text-base transition-colors outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 md:text-sm",
+                  )}
+                />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+      </div>
     </>
   )
 }
@@ -756,16 +1748,20 @@ function StrategyCreateDialog({ onCreated }: { onCreated: () => void }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button size="sm" variant="secondary">
+        <Button size="sm" className="gap-1.5">
+          <Plus className="size-4 shrink-0" aria-hidden />
           New strategy
         </Button>
       </DialogTrigger>
       <DialogContent>
-        <DialogHeader>
-          <DialogTitle>New strategy</DialogTitle>
+        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+          <DialogTitle className="min-w-0 flex-1 pr-8">New strategy</DialogTitle>
+          <Button type="submit" form="portfolio-strategy-create" size="sm" className="shrink-0">
+            Create
+          </Button>
         </DialogHeader>
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
+          <form id="portfolio-strategy-create" onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
             <FormField
               control={form.control}
               name="name"
@@ -787,9 +1783,6 @@ function StrategyCreateDialog({ onCreated }: { onCreated: () => void }) {
               />
               Set as active (deactivates others)
             </label>
-            <DialogFooter>
-              <Button type="submit">Create</Button>
-            </DialogFooter>
           </form>
         </Form>
       </DialogContent>
@@ -833,11 +1826,14 @@ function RenameStrategyDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Rename strategy</DialogTitle>
+        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+          <DialogTitle className="min-w-0 flex-1 pr-8">Rename strategy</DialogTitle>
+          <Button type="submit" form="portfolio-strategy-rename" size="sm" className="shrink-0">
+            Save
+          </Button>
         </DialogHeader>
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
+          <form id="portfolio-strategy-rename" onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
             <FormField
               control={form.control}
               name="name"
@@ -851,9 +1847,6 @@ function RenameStrategyDialog({
                 </FormItem>
               )}
             />
-            <DialogFooter>
-              <Button type="submit">Save</Button>
-            </DialogFooter>
           </form>
         </Form>
       </DialogContent>

@@ -1,6 +1,6 @@
 import { asc, desc, eq } from "drizzle-orm"
 
-import { monthlyPlannedForLine } from "@/lib/budget/planned-line"
+import { monthlyPlannedForExpenseCategory, monthlyPlannedForLine } from "@/lib/budget/planned-line"
 import {
   BUDGET_SUMMARY_CURRENCIES,
   resolveBudgetSummaryCurrency,
@@ -16,6 +16,9 @@ import {
 } from "@/lib/dates"
 import { getDb } from "@/lib/db"
 import {
+  allocationStrategies,
+  allocationTargets,
+  assets,
   budgetMonthPlanLines,
   expenseCategories,
   expenseLines,
@@ -104,6 +107,31 @@ function sumNativeLineMapInReportingCurrency(args: {
   return { total, ok: true }
 }
 
+/** Sum each line’s native buckets into reporting currency, then roll up by category id. */
+function sumLineMapByCategoryId(args: {
+  lines: Array<{ id: string; categoryId: string }>
+  lineMap: LineNativeMonthTotals
+  reportingCurrency: string
+  fx: { rates: Map<string, number> } | null
+}): Record<string, number> {
+  const { lines, lineMap, reportingCurrency, fx } = args
+  const out: Record<string, number> = {}
+  for (const line of lines) {
+    const buckets = lineMap[line.id]
+    if (!buckets || Object.keys(buckets).length === 0) continue
+    const single: LineNativeMonthTotals = { [line.id]: buckets }
+    const r = sumNativeLineMapInReportingCurrency({
+      lineMap: single,
+      reportingCurrency,
+      fx,
+    })
+    if (!r.ok) continue
+    const k = line.categoryId
+    out[k] = (out[k] ?? 0) + r.total
+  }
+  return out
+}
+
 function sumIncomeRecordsInReportingCurrency(args: {
   allIncomeRec: (typeof incomeRecords.$inferSelect)[]
   start: string
@@ -178,7 +206,7 @@ const empty = {
   },
   summaryCurrency: "AED" as const,
   summaryCurrencyOptions: [...BUDGET_SUMMARY_CURRENCIES],
-  goalCurrency: "USD",
+  goalCurrency: "AED",
   fxWarning: null as string | null,
   incomeLines: [] as (typeof incomeLines.$inferSelect)[],
   incomeRecordsByLineId: {} as Record<string, (typeof incomeRecords.$inferSelect)[]>,
@@ -189,6 +217,24 @@ const empty = {
   expenseRecordsByLineId: {} as Record<string, (typeof expenseRecords.$inferSelect)[]>,
   expenseActualByLineNative: {} as LineNativeMonthTotals,
   expensePlannedByLineNative: {} as LineNativeMonthTotals,
+  expensePlannedByCategoryId: {} as Record<string, number>,
+  expenseActualByCategoryId: {} as Record<string, number>,
+  strategyAllocate: {
+    canAllocate: false,
+    disabledReason: null as string | null,
+    targetCount: 0,
+    weightSum: 0,
+  },
+  allocatePreview: null as {
+    strategyId: string
+    strategyName: string
+    targets: {
+      assetId: string
+      assetName: string
+      currency: string
+      weightPercent: number
+    }[]
+  } | null,
 }
 
 export type BudgetPageData = Awaited<ReturnType<typeof getBudgetPageData>>
@@ -225,7 +271,7 @@ export async function getBudgetPageData(opts?: {
     .where(eq(goals.isActive, true))
     .orderBy(desc(goals.updatedAt))
     .limit(1)
-  const goalCurrency = activeGoal?.currency ?? "USD"
+  const goalCurrency = activeGoal?.currency ?? "AED"
   const summaryCurrency = resolveBudgetSummaryCurrency(opts?.summaryCurrency, goalCurrency)
 
   const fx = await loadRatesOnOrBefore(db, utcIsoDateString(now))
@@ -246,6 +292,11 @@ export async function getBudgetPageData(opts?: {
 
   const planUsesSnapshot = isPastMonth && snapshotRows.length > 0
 
+  const cats = await db
+    .select()
+    .from(expenseCategories)
+    .orderBy(asc(expenseCategories.sortOrder), asc(expenseCategories.name))
+
   const incomeActualByLineNative: LineNativeMonthTotals = {}
   for (const r of allIncomeRec) {
     if (r.occurredOn >= start && r.occurredOn <= end) {
@@ -254,7 +305,8 @@ export async function getBudgetPageData(opts?: {
   }
 
   const incomePlannedByLineNative: LineNativeMonthTotals = {}
-  if (planUsesSnapshot) {
+  const hasIncomeSnapshotRows = snapshotRows.some((r) => r.lineKind === "income" && r.incomeLineId)
+  if (isPastMonth && hasIncomeSnapshotRows) {
     for (const row of snapshotRows) {
       if (row.lineKind !== "income" || !row.incomeLineId) continue
       const amt = Number(row.plannedAmount)
@@ -281,11 +333,6 @@ export async function getBudgetPageData(opts?: {
       id: expenseLines.id,
       categoryId: expenseLines.categoryId,
       name: expenseLines.name,
-      isRecurring: expenseLines.isRecurring,
-      frequency: expenseLines.frequency,
-      recurringAmount: expenseLines.recurringAmount,
-      recurringCurrency: expenseLines.recurringCurrency,
-      recurringAnchorDate: expenseLines.recurringAnchorDate,
       createdAt: expenseLines.createdAt,
       categoryName: expenseCategories.name,
     })
@@ -293,22 +340,41 @@ export async function getBudgetPageData(opts?: {
     .innerJoin(expenseCategories, eq(expenseLines.categoryId, expenseCategories.id))
     .orderBy(asc(expenseCategories.sortOrder), asc(expenseLines.name))
 
-  const expensePlannedByLineNative: LineNativeMonthTotals = {}
-  if (planUsesSnapshot) {
+  /** Category id → native currency buckets for planned expense (envelope per category). */
+  const expensePlannedByCategoryNative: LineNativeMonthTotals = {}
+  const hasExpenseCategorySnap = snapshotRows.some(
+    (r) => r.lineKind === "expense_category" && r.expenseCategoryId,
+  )
+  const hasLegacyExpenseLineSnap = snapshotRows.some((r) => r.lineKind === "expense" && r.expenseLineId)
+
+  if (isPastMonth && hasExpenseCategorySnap) {
     for (const row of snapshotRows) {
-      if (row.lineKind !== "expense" || !row.expenseLineId) continue
+      if (row.lineKind !== "expense_category" || !row.expenseCategoryId) continue
       const amt = Number(row.plannedAmount)
       const c = row.currency.toUpperCase()
-      if (!expensePlannedByLineNative[row.expenseLineId])
-        expensePlannedByLineNative[row.expenseLineId] = {}
-      expensePlannedByLineNative[row.expenseLineId][c] = amt
+      if (!expensePlannedByCategoryNative[row.expenseCategoryId])
+        expensePlannedByCategoryNative[row.expenseCategoryId] = {}
+      expensePlannedByCategoryNative[row.expenseCategoryId]![c] = amt
+    }
+  } else if (isPastMonth && hasLegacyExpenseLineSnap) {
+    const lineToCat = new Map(expLinesFull.map((l) => [l.id, l.categoryId]))
+    for (const row of snapshotRows) {
+      if (row.lineKind !== "expense" || !row.expenseLineId) continue
+      const cid = lineToCat.get(row.expenseLineId)
+      if (!cid) continue
+      const amt = Number(row.plannedAmount)
+      const c = row.currency.toUpperCase()
+      if (!expensePlannedByCategoryNative[cid]) expensePlannedByCategoryNative[cid] = {}
+      expensePlannedByCategoryNative[cid]![c] = (expensePlannedByCategoryNative[cid]![c] ?? 0) + amt
     }
   } else {
-    for (const line of expLinesFull) {
-      const { currency, amount } = monthlyPlannedForLine(line, start, end)
-      bumpNative(expensePlannedByLineNative, line.id, currency, amount)
+    for (const cat of cats) {
+      const { currency, amount } = monthlyPlannedForExpenseCategory(cat)
+      bumpNative(expensePlannedByCategoryNative, cat.id, currency, amount)
     }
   }
+
+  const expensePlannedByLineNative: LineNativeMonthTotals = {}
 
   let incomeActual = sumIncomeRecordsInReportingCurrency({
     allIncomeRec,
@@ -330,10 +396,12 @@ export async function getBudgetPageData(opts?: {
     fx,
   })
   let expensePlanned = sumNativeLineMapInReportingCurrency({
-    lineMap: expensePlannedByLineNative,
+    lineMap: expensePlannedByCategoryNative,
     reportingCurrency: summaryCurrency,
     fx,
   })
+
+  let summaryFxForCategory: { rates: Map<string, number> } | null = fx
 
   if (
     (!incomeActual.ok ||
@@ -343,6 +411,7 @@ export async function getBudgetPageData(opts?: {
     fx
   ) {
     fxWarning = `Could not convert some flows to ${summaryCurrency} for the summary row.`
+    summaryFxForCategory = null
     incomeActual = sumIncomeRecordsInReportingCurrency({
       allIncomeRec,
       start,
@@ -363,7 +432,7 @@ export async function getBudgetPageData(opts?: {
       fx: null,
     })
     expensePlanned = sumNativeLineMapInReportingCurrency({
-      lineMap: expensePlannedByLineNative,
+      lineMap: expensePlannedByCategoryNative,
       reportingCurrency: summaryCurrency,
       fx: null,
     })
@@ -373,6 +442,86 @@ export async function getBudgetPageData(opts?: {
     0,
     (incomeActual.ok ? incomeActual.income : 0) - (expenseActual.ok ? expenseActual.expense : 0),
   )
+
+  const [activeStrat] = await db
+    .select()
+    .from(allocationStrategies)
+    .where(eq(allocationStrategies.isActive, true))
+    .orderBy(desc(allocationStrategies.updatedAt))
+    .limit(1)
+
+  let strategyAllocate: {
+    /** True when an active strategy has targets with a positive weight sum (button enabled). Investable may still be zero; server rejects that case. */
+    canAllocate: boolean
+    disabledReason: string | null
+    targetCount: number
+    weightSum: number
+  } = {
+    canAllocate: false,
+    disabledReason: null,
+    targetCount: 0,
+    weightSum: 0,
+  }
+
+  type StratTargetRow = {
+    assetId: string
+    weightPercent: string
+    assetName: string
+    currency: string | null
+  }
+  let stratTargetRows: StratTargetRow[] = []
+
+  if (!activeStrat) {
+    strategyAllocate = {
+      canAllocate: false,
+      disabledReason: "No active portfolio strategy (set one under Portfolio → Strategy).",
+      targetCount: 0,
+      weightSum: 0,
+    }
+  } else {
+    stratTargetRows = await db
+      .select({
+        assetId: allocationTargets.assetId,
+        weightPercent: allocationTargets.weightPercent,
+        assetName: assets.name,
+        currency: assets.currency,
+      })
+      .from(allocationTargets)
+      .innerJoin(assets, eq(allocationTargets.assetId, assets.id))
+      .where(eq(allocationTargets.strategyId, activeStrat.id))
+      .orderBy(asc(assets.name))
+
+    const weightSum = stratTargetRows.reduce((s, r) => s + Number(r.weightPercent), 0)
+    const targetCount = stratTargetRows.length
+
+    let disabledReason: string | null = null
+    if (targetCount === 0) {
+      disabledReason = "Active strategy has no allocation targets."
+    } else if (weightSum <= 0) {
+      disabledReason = "Allocation weights must sum to a positive total."
+    }
+
+    strategyAllocate = {
+      canAllocate: disabledReason === null,
+      disabledReason,
+      targetCount,
+      weightSum,
+    }
+  }
+
+  const allocatePreview =
+    activeStrat && stratTargetRows.length > 0
+      ? {
+          strategyId: activeStrat.id,
+          strategyName: activeStrat.name,
+          targets: stratTargetRows.map((r) => ({
+            assetId: r.assetId,
+            assetName: r.assetName,
+            currency: r.currency ?? "USD",
+            weightPercent: Number(r.weightPercent),
+          })),
+        }
+      : null
 
   const lines = [...linesRaw].sort((a, b) => {
     const va = Math.max(
@@ -387,22 +536,31 @@ export async function getBudgetPageData(opts?: {
     return a.name.localeCompare(b.name)
   })
 
-  const cats = await db
-    .select()
-    .from(expenseCategories)
-    .orderBy(asc(expenseCategories.sortOrder), asc(expenseCategories.name))
-
   const expLinesSorted = [...expLinesFull].sort((a, b) => {
-    const va = Math.max(
-      sortWeightNative(expenseActualByLineNative[a.id]),
-      sortWeightNative(expensePlannedByLineNative[a.id]),
-    )
-    const vb = Math.max(
-      sortWeightNative(expenseActualByLineNative[b.id]),
-      sortWeightNative(expensePlannedByLineNative[b.id]),
-    )
+    const va = sortWeightNative(expenseActualByLineNative[a.id])
+    const vb = sortWeightNative(expenseActualByLineNative[b.id])
     if (vb !== va) return vb - va
     return a.name.localeCompare(b.name)
+  })
+
+  const expLinesForMonth = expLinesSorted
+
+  const expensePlannedByCategoryId: Record<string, number> = {}
+  for (const c of cats) {
+    const buckets = expensePlannedByCategoryNative[c.id]
+    if (!buckets || Object.keys(buckets).length === 0) continue
+    const r = sumNativeLineMapInReportingCurrency({
+      lineMap: { [c.id]: buckets },
+      reportingCurrency: summaryCurrency,
+      fx: summaryFxForCategory,
+    })
+    if (r.ok) expensePlannedByCategoryId[c.id] = r.total
+  }
+  const expenseActualByCategoryId = sumLineMapByCategoryId({
+    lines: expLinesForMonth,
+    lineMap: expenseActualByLineNative,
+    reportingCurrency: summaryCurrency,
+    fx: summaryFxForCategory,
   })
 
   return {
@@ -428,9 +586,13 @@ export async function getBudgetPageData(opts?: {
     incomeActualByLineNative,
     incomePlannedByLineNative,
     expenseCategories: cats,
-    expenseLines: expLinesSorted,
+    expenseLines: expLinesForMonth,
     expenseRecordsByLineId: groupExpenseRecords(allExpRec),
     expenseActualByLineNative,
     expensePlannedByLineNative,
+    expensePlannedByCategoryId,
+    expenseActualByCategoryId,
+    strategyAllocate,
+    allocatePreview,
   }
 }

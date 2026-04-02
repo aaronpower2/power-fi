@@ -14,6 +14,7 @@ import {
 } from "@/lib/actions/goal"
 import { SUPPORTED_CURRENCIES } from "@/lib/currency/iso4217"
 import type { GoalWithLifestyle } from "@/lib/data/goals"
+import { formatGoalDisplayName } from "@/lib/goals/labels"
 import { formatCurrency } from "@/lib/format"
 import {
   createGoalSchema,
@@ -31,7 +32,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   Dialog,
   DialogContent,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
@@ -70,7 +70,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { MoreHorizontal, Plus, Trash2 } from "lucide-react"
+import { CheckCircle2, MoreHorizontal, Plus, Trash2 } from "lucide-react"
 
 type GoalRow = typeof goals.$inferSelect
 
@@ -217,16 +217,29 @@ export function GoalManager({ items }: { items: GoalWithLifestyle[] }) {
 
         <Card>
           <CardHeader>
-            <CardHeaderTitleRow
-              title={<CardTitle>Independence target</CardTitle>}
-              info={
-                <>
-                  One active goal drives projections. Withdrawal rate is stored as a decimal; you enter percent in
-                  the form. Required portfolio on the summary uses: (sum of lifestyle lines × 12) ÷ withdrawal
-                  rate.
-                </>
-              }
-            />
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0 flex-1">
+                <CardHeaderTitleRow
+                  title={
+                    <CardTitle>
+                      {active ? formatGoalDisplayName(active.goal) : "Independence target"}
+                    </CardTitle>
+                  }
+                  info={
+                    <>
+                      One active goal drives projections. Withdrawal rate is stored as a decimal; you enter percent
+                      in the form. Required portfolio on the summary uses: (sum of lifestyle lines × 12) ÷ withdrawal
+                      rate.
+                    </>
+                  }
+                />
+              </div>
+              {active ? (
+                <Button type="submit" form="goal-active-form" size="sm" className="shrink-0">
+                  Save
+                </Button>
+              ) : null}
+            </div>
           </CardHeader>
           <CardContent>
             <TabsContent value="active" className="mt-0 outline-none">
@@ -251,6 +264,7 @@ export function GoalManager({ items }: { items: GoalWithLifestyle[] }) {
                 <Table>
                   <TableHeader>
                     <TableRow>
+                      <TableHead>Name</TableHead>
                       <TableHead>FI date</TableHead>
                       <TableHead>Monthly need</TableHead>
                       <TableHead className="w-12" />
@@ -259,6 +273,9 @@ export function GoalManager({ items }: { items: GoalWithLifestyle[] }) {
                   <TableBody>
                     {inactive.map(({ goal: g }) => (
                       <TableRow key={g.id}>
+                        <TableCell className="max-w-[12rem] truncate font-medium">
+                          {formatGoalDisplayName(g)}
+                        </TableCell>
                         <TableCell className="font-mono text-xs">{g.fiDate}</TableCell>
                         <TableCell>
                           {formatCurrency(
@@ -283,6 +300,7 @@ export function GoalManager({ items }: { items: GoalWithLifestyle[] }) {
                                   } else toast.error(r.error)
                                 }}
                               >
+                                <CheckCircle2 className="size-4 opacity-70" />
                                 Set active
                               </DropdownMenuItem>
                               <DropdownMenuItem
@@ -292,6 +310,7 @@ export function GoalManager({ items }: { items: GoalWithLifestyle[] }) {
                                   setPendingDelete(g.id)
                                 }}
                               >
+                                <Trash2 className="size-4 opacity-70" />
                                 Delete
                               </DropdownMenuItem>
                             </DropdownMenuContent>
@@ -375,6 +394,7 @@ function ActiveGoalForm({
     resolver: zodResolver(updateGoalSchema),
     defaultValues: {
       id: goal.id,
+      name: goal.name?.trim() ? goal.name : "",
       currency: (goal.currency ?? "USD") as UpdateGoalInput["currency"],
       fiDate: goal.fiDate,
       withdrawalRatePercent: Number(goal.withdrawalRate) * 100,
@@ -393,7 +413,23 @@ function ActiveGoalForm({
 
   return (
     <Form {...form}>
-      <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+      <form id="goal-active-form" onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+        <FormField
+          control={form.control}
+          name="name"
+          render={({ field }) => (
+            <FormItem>
+              <div className="flex items-center gap-1">
+                <FormLabel>Goal name</FormLabel>
+                <InfoTooltip>Shown in FI summary and goal lists. Use something you’ll recognize (e.g. Lean FIRE, NZ base).</InfoTooltip>
+              </div>
+              <FormControl>
+                <Input placeholder="e.g. Coast FI — NZ" autoComplete="off" {...field} />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
             <FormField
               control={form.control}
               name="currency"
@@ -454,9 +490,6 @@ function ActiveGoalForm({
           control={form.control as unknown as Control<GoalLifestyleFormValues>}
           currencyCode={goalCurrency}
         />
-        <Button type="submit" size="sm">
-          Save active goal
-        </Button>
       </form>
     </Form>
   )
@@ -476,6 +509,7 @@ function CreateGoalDialog({
   const form = useForm<GoalInput>({
     resolver: zodResolver(goalInputSchema),
     defaultValues: {
+      name: "",
       currency: "USD",
       fiDate: "",
       withdrawalRatePercent: 4,
@@ -499,6 +533,7 @@ function CreateGoalDialog({
       toast.success("Goal created")
       onOpenChange(false)
       form.reset({
+        name: "",
         currency: "USD",
         fiDate: "",
         withdrawalRatePercent: 4,
@@ -515,16 +550,35 @@ function CreateGoalDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <div className="flex items-center gap-1.5 pr-8">
+        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 pr-8">
             <DialogTitle>Create goal</DialogTitle>
             <InfoTooltip>
               Set FI date, withdrawal rate, and lifestyle lines that sum to your monthly funding target.
             </InfoTooltip>
           </div>
+          <Button type="submit" form="goal-create-form" size="sm" className="shrink-0">
+            Create
+          </Button>
         </DialogHeader>
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+          <form id="goal-create-form" onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+            <FormField
+              control={form.control}
+              name="name"
+              render={({ field }) => (
+                <FormItem>
+                  <div className="flex items-center gap-1">
+                    <FormLabel>Goal name</FormLabel>
+                    <InfoTooltip>How this goal appears in FI summary and lists.</InfoTooltip>
+                  </div>
+                  <FormControl>
+                    <Input placeholder="e.g. Baseline plan" autoComplete="off" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
             <FormField
               control={form.control}
               name="currency"
@@ -587,9 +641,6 @@ function CreateGoalDialog({
               />
               Set as active goal (deactivates others)
             </label>
-            <DialogFooter>
-              <Button type="submit">Create</Button>
-            </DialogFooter>
           </form>
         </Form>
       </DialogContent>

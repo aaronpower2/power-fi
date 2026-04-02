@@ -39,6 +39,7 @@ export async function createGoal(
     const [row] = await tx
       .insert(goals)
       .values({
+        name: v.name,
         fiDate: v.fiDate,
         withdrawalRate,
         monthlyFundingRequirement: total.toFixed(2),
@@ -91,6 +92,7 @@ export async function updateGoal(input: unknown): Promise<ActionResult> {
     await tx
       .update(goals)
       .set({
+        name: v.name,
         fiDate: v.fiDate,
         withdrawalRate,
         monthlyFundingRequirement: total.toFixed(2),

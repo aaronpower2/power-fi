@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { monthlyPlannedForLine } from "@/lib/budget/planned-line"
+import { monthlyPlannedForExpenseCategory, monthlyPlannedForLine } from "@/lib/budget/planned-line"
 
 describe("monthlyPlannedForLine", () => {
   it("returns zero for non-recurring line", () => {
@@ -49,5 +49,27 @@ describe("monthlyPlannedForLine", () => {
       "2026-06-30",
     )
     assert.ok(Math.abs(r.amount - (100 * 52) / 12) < 0.0001)
+  })
+})
+
+describe("monthlyPlannedForExpenseCategory", () => {
+  it("returns zero when not recurring", () => {
+    const r = monthlyPlannedForExpenseCategory({
+      isRecurring: false,
+      frequency: null,
+      recurringAmount: null,
+      recurringCurrency: "USD",
+    })
+    assert.equal(r.amount, 0)
+  })
+
+  it("uses smoothed monthly equivalent for weekly", () => {
+    const r = monthlyPlannedForExpenseCategory({
+      isRecurring: true,
+      frequency: "weekly",
+      recurringAmount: "120",
+      recurringCurrency: "AED",
+    })
+    assert.ok(Math.abs(r.amount - (120 * 52) / 12) < 0.0001)
   })
 })

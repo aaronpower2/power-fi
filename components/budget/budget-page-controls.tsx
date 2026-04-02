@@ -1,17 +1,229 @@
 "use client"
 
+import { useMemo, useState, useSyncExternalStore } from "react"
 import { useRouter } from "next/navigation"
-import { useState } from "react"
 import { toast } from "sonner"
-import { ChevronLeft, ChevronRight } from "lucide-react"
+import { CalendarDays, ChevronLeft, ChevronRight, Lock } from "lucide-react"
 
 import { InfoTooltip } from "@/components/info-tooltip"
 import { Button } from "@/components/ui/button"
+import { cn } from "@/lib/utils"
+import { Label } from "@/components/ui/label"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { AllocateInvestableCapitalCta } from "@/components/budget/allocate-investable-capital-cta"
 import { finalizeBudgetMonth } from "@/lib/actions/budget"
 import type { getBudgetPageData } from "@/lib/data/budget"
-import { addMonthsToYm } from "@/lib/dates"
+import { addMonthsToYm, formatYearMonthYm, parseYearMonthYm } from "@/lib/dates"
 
 type BudgetData = Awaited<ReturnType<typeof getBudgetPageData>>
+
+function subscribeToHydration(cb: () => void) {
+  if (typeof window === "undefined") return () => {}
+  queueMicrotask(cb)
+  return () => {}
+}
+
+function useClientMounted(): boolean {
+  return useSyncExternalStore(
+    subscribeToHydration,
+    () => true,
+    () => false,
+  )
+}
+
+const MONTH_OPTIONS = Array.from({ length: 12 }, (_, i) => ({
+  value: String(i + 1).padStart(2, "0"),
+  label: new Date(Date.UTC(2000, i, 1)).toLocaleString("en-US", {
+    month: "long",
+    timeZone: "UTC",
+  }),
+}))
+
+function BudgetMonthSelector({
+  data,
+  budgetQuery,
+  goMonth,
+}: {
+  data: BudgetData
+  budgetQuery: (nextYm: string) => string
+  goMonth: (delta: number) => void
+}) {
+  const router = useRouter()
+  const [pickerOpen, setPickerOpen] = useState(false)
+  /** Radix Popover generates aria-controls IDs that can differ SSR vs client; mount popover after hydrate. */
+  const popoverReady = useClientMounted()
+
+  const { year, monthIndex0, monthValue } = useMemo(() => {
+    const p = parseYearMonthYm(data.ym)
+    const now = new Date()
+    const y = p?.year ?? now.getUTCFullYear()
+    const m0 = p?.monthIndex0 ?? now.getUTCMonth()
+    return {
+      year: y,
+      monthIndex0: m0,
+      monthValue: String(m0 + 1).padStart(2, "0"),
+    }
+  }, [data.ym])
+
+  const yearOptions = useMemo(() => {
+    const ys: number[] = []
+    const lo = year - 15
+    const hi = year + 8
+    for (let y = lo; y <= hi; y++) ys.push(y)
+    return ys
+  }, [year])
+
+  function commit(nextYear: number, nextMonthIndex0: number) {
+    const ym = formatYearMonthYm(nextYear, nextMonthIndex0)
+    if (ym !== data.ym) {
+      router.push(`/budget?${budgetQuery(ym)}`)
+    }
+    setPickerOpen(false)
+  }
+
+  const isViewingCurrentUtcMonth = useMemo(() => {
+    const d = new Date()
+    return data.ym === formatYearMonthYm(d.getUTCFullYear(), d.getUTCMonth())
+  }, [data.ym])
+
+  function goCurrentUtcMonth() {
+    const d = new Date()
+    const ym = formatYearMonthYm(d.getUTCFullYear(), d.getUTCMonth())
+    if (ym !== data.ym) {
+      router.push(`/budget?${budgetQuery(ym)}`)
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <div
+        className="bg-muted/40 relative inline-flex items-center rounded-lg border p-0.5"
+        role="group"
+        aria-label="Budget month"
+      >
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        className="shrink-0 self-center"
+        aria-label="Previous month"
+        onClick={() => goMonth(-1)}
+      >
+        <ChevronLeft className="size-4" />
+      </Button>
+      {popoverReady ? (
+        <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
+          <PopoverTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="text-foreground hover:bg-muted/80 h-7 min-w-38 gap-1.5 px-3 text-sm font-medium sm:min-w-44"
+              aria-label={`Selected month ${data.monthLabel}. Open month picker.`}
+              aria-expanded={pickerOpen}
+              aria-haspopup="dialog"
+            >
+              <CalendarDays className="text-muted-foreground size-4 shrink-0" aria-hidden />
+              <span className="truncate">{data.monthLabel}</span>
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="w-auto min-w-68" align="center" sideOffset={8}>
+            <div className="flex flex-col gap-3">
+              <Label className="text-muted-foreground text-xs font-medium">Month (UTC)</Label>
+              <div className="flex gap-2">
+                <Select
+                  value={monthValue}
+                  onValueChange={(v) => {
+                    commit(year, Number.parseInt(v, 10) - 1)
+                  }}
+                >
+                  <SelectTrigger className="min-w-0 flex-1" size="sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent position="popper" className="z-100">
+                    {MONTH_OPTIONS.map((m) => (
+                      <SelectItem key={m.value} value={m.value}>
+                        {m.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select
+                  value={String(year)}
+                  onValueChange={(v) => {
+                    commit(Number.parseInt(v, 10), monthIndex0)
+                  }}
+                >
+                  <SelectTrigger className="w-20 shrink-0" size="sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent position="popper" className="z-100">
+                    {yearOptions.map((y) => (
+                      <SelectItem key={y} value={String(y)}>
+                        {y}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          </PopoverContent>
+        </Popover>
+      ) : (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className={cn(
+            "text-foreground hover:bg-muted/80 h-7 min-w-38 gap-1.5 px-3 text-sm font-medium sm:min-w-44",
+            "pointer-events-none select-none",
+          )}
+          aria-label={`Selected month ${data.monthLabel}. Open month picker.`}
+          aria-haspopup="dialog"
+          aria-expanded={false}
+          aria-disabled
+          tabIndex={-1}
+        >
+          <CalendarDays className="text-muted-foreground size-4 shrink-0" aria-hidden />
+          <span className="truncate">{data.monthLabel}</span>
+        </Button>
+      )}
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        className="shrink-0 self-center"
+        aria-label="Next month"
+        onClick={() => goMonth(1)}
+      >
+        <ChevronRight className="size-4" />
+      </Button>
+      </div>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="text-muted-foreground hover:text-foreground h-7 shrink-0 px-2.5 text-xs font-medium"
+        disabled={isViewingCurrentUtcMonth}
+        aria-label={
+          isViewingCurrentUtcMonth
+            ? "Already viewing current UTC month"
+            : "Jump to current UTC month"
+        }
+        onClick={goCurrentUtcMonth}
+      >
+        This month
+      </Button>
+    </div>
+  )
+}
 
 function BudgetSummaryCurrencySwitch({ data }: { data: BudgetData }) {
   const router = useRouter()
@@ -23,26 +235,23 @@ function BudgetSummaryCurrencySwitch({ data }: { data: BudgetData }) {
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <span className="text-muted-foreground hidden text-xs font-medium sm:inline">Summary</span>
-      <div
-        className="bg-muted/40 inline-flex rounded-lg border p-0.5"
-        role="group"
-        aria-label="Summary reporting currency"
-      >
-        {data.summaryCurrencyOptions.map((ccy) => (
-          <Button
-            key={ccy}
-            type="button"
-            size="sm"
-            variant={data.summaryCurrency === ccy ? "secondary" : "ghost"}
-            className="h-7 min-w-[3rem] px-2.5 text-xs font-medium"
-            onClick={() => setCcy(ccy)}
-          >
-            {ccy}
-          </Button>
-        ))}
-      </div>
+    <div
+      className="bg-muted/40 inline-flex rounded-lg border p-0.5"
+      role="group"
+      aria-label="Reporting currency for budget totals"
+    >
+      {data.summaryCurrencyOptions.map((ccy) => (
+        <Button
+          key={ccy}
+          type="button"
+          size="sm"
+          variant={data.summaryCurrency === ccy ? "secondary" : "ghost"}
+          className="h-7 min-w-12 px-2.5 text-xs font-medium"
+          onClick={() => setCcy(ccy)}
+        >
+          {ccy}
+        </Button>
+      ))}
     </div>
   )
 }
@@ -66,43 +275,16 @@ export function BudgetPageControls({ data }: { data: BudgetData }) {
 
   return (
     <div className="flex w-full flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          type="button"
-          variant="outline"
-          size="icon-sm"
-          aria-label="Previous month"
-          onClick={() => goMonth(-1)}
-        >
-          <ChevronLeft className="size-4" />
-        </Button>
-        <div className="text-muted-foreground flex flex-wrap items-center gap-1.5 text-sm">
-          <span className="text-foreground font-medium">{data.monthLabel}</span>
-          <span className="text-muted-foreground font-mono text-xs">({data.ym})</span>
-          <InfoTooltip>
-            Calendar month uses UTC boundaries. Planned vs actual uses native currencies on each line;
-            summary amounts use the currency you choose (AED / NZD / AUD). Past months can lock planned
-            totals with Finalize (snapshot from current line rules).
-          </InfoTooltip>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="icon-sm"
-          aria-label="Next month"
-          onClick={() => goMonth(1)}
-        >
-          <ChevronRight className="size-4" />
-        </Button>
-      </div>
+      <BudgetMonthSelector data={data} budgetQuery={budgetQuery} goMonth={goMonth} />
       <div className="flex flex-wrap items-center gap-3 sm:justify-end">
         <BudgetSummaryCurrencySwitch data={data} />
+        <AllocateInvestableCapitalCta data={data} refresh={refresh} />
         {data.isPastMonth ? (
           <div className="flex flex-wrap items-center gap-2">
             <Button
               type="button"
-              variant="secondary"
               size="sm"
+              className="gap-1.5"
               disabled={finalizing}
               onClick={async () => {
                 setFinalizing(true)
@@ -111,18 +293,26 @@ export function BudgetPageControls({ data }: { data: BudgetData }) {
                 if (r.ok) {
                   toast.success(
                     data.planUsesSnapshot
-                      ? "Plan snapshot updated for this month."
-                      : "Plan locked for this month.",
+                      ? "Closed month updated with current line rules."
+                      : "Month closed — planned amounts saved for this month.",
                   )
                   refresh()
                 } else toast.error(r.error)
               }}
             >
-              {finalizing ? "Finalizing…" : data.planUsesSnapshot ? "Re-finalize plan" : "Finalize plan"}
+              <Lock className="size-4 shrink-0" aria-hidden />
+              {finalizing
+                ? data.planUsesSnapshot
+                  ? "Updating…"
+                  : "Closing…"
+                : data.planUsesSnapshot
+                  ? "Re-close month"
+                  : "Close month"}
             </Button>
             <InfoTooltip>
-              Saves planned amounts for every income and expense line for this UTC month using your current
-              recurring rules. Use soon after month-end if you change line settings often.
+              Freezes planned amounts for every income line and every expense category for this UTC month using
+              your current recurring rules. Past months then keep that plan even if you edit categories or lines
+              later. You can re-close to refresh the snapshot from today&apos;s definitions.
             </InfoTooltip>
           </div>
         ) : null}
