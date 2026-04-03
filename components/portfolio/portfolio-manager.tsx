@@ -33,6 +33,7 @@ import {
   createAssetSchema,
   createLiabilitySchema,
   createStrategySchema,
+  LIABILITY_TRACKING_MODES,
   strategyNameSchema,
   updateAssetSchema,
   updateLiabilitySchema,
@@ -46,6 +47,7 @@ import {
   type PortfolioAllocationRecordRow,
 } from "@/lib/data/portfolio"
 import { formatCurrency } from "@/lib/format"
+import { dashboardRoutes } from "@/lib/routes"
 import { cn } from "@/lib/utils"
 import { CardHeaderTitleRow, InfoTooltip } from "@/components/info-tooltip"
 import { PageHeader } from "@/components/page-header"
@@ -123,8 +125,8 @@ type PortfolioPayload = Awaited<ReturnType<typeof getPortfolioData>>
 type AssetRow = PortfolioPayload["assets"][number]
 type LiabilityRow = PortfolioPayload["liabilities"][number]
 type CreateAssetForm = z.infer<typeof createAssetSchema>
-type CreateLiabilityForm = z.infer<typeof createLiabilitySchema>
-type UpdateLiabilityInput = z.infer<typeof updateLiabilitySchema>
+type CreateLiabilityForm = z.input<typeof createLiabilitySchema>
+type UpdateLiabilityInput = z.input<typeof updateLiabilitySchema>
 
 const portfolioTabTriggerCn =
   "relative inline-flex h-[calc(100%-1px)] flex-1 items-center justify-center gap-1.5 rounded-md border border-transparent px-1.5 py-0.5 text-sm font-medium whitespace-nowrap transition-all focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
@@ -150,7 +152,7 @@ function PortfolioSummaryCurrencySwitch({
           size="sm"
           variant={summaryCurrency === ccy ? "secondary" : "ghost"}
           className="h-7 min-w-12 px-2.5 text-xs font-medium"
-          onClick={() => router.push(`/portfolio?ccy=${ccy}`)}
+          onClick={() => router.push(`${dashboardRoutes.netWorth}?ccy=${ccy}`)}
         >
           {ccy}
         </Button>
@@ -215,8 +217,8 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
       className="group/tabs flex w-full flex-col gap-8"
     >
       <PageHeader
-        title="Portfolio"
-        description="Assets by type and growth model. Strategy splits drive how investable capital is allocated each month."
+        title="Net Worth"
+        description="Track what you own, what you owe, and how your allocation strategy shapes projected net worth through FI."
         controls={
           <div className="flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div
@@ -338,7 +340,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
             <CardHeader className="gap-0 pb-1 pt-3">
               <CardTitle className="text-sm font-medium leading-tight">Total liabilities</CardTitle>
               <p className="text-muted-foreground line-clamp-2 text-[11px] leading-snug">
-                Principal owed
+                Remaining owed
               </p>
             </CardHeader>
             <CardContent className="pb-3 pt-0">
@@ -370,7 +372,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
           <CardHeader className="pb-2">
             <CardTitle className="text-base font-medium">Projected total by year</CardTitle>
             <p className="text-muted-foreground text-xs">
-              Net of liabilities (debt held flat); gross asset model through FI
+              Net worth path after projected liabilities; gross asset model through FI
               {fiDateLabel ? ` (${fiDateLabel})` : ""}
               {fxAsOfDate ? ` · FX ${fxAsOfDate}` : ""}
             </p>
@@ -562,7 +564,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
           <CardHeader>
             <CardHeaderTitleRow
               title={<CardTitle>Liabilities</CardTitle>}
-              info="Principal owed (positive balance). Optional link to a securing asset for reference. Debt is treated as flat in projections (today’s total subtracted each month). Cash interest/principal payments belong in Budget."
+              info="Track what you still owe. Fixed-installment liabilities can decline through linked debt-payment categories in Cash Flow; revolving balances stay manual unless you update them here."
             />
           </CardHeader>
           <CardContent>
@@ -987,6 +989,7 @@ function liabilityToFormValues(row: LiabilityRow): UpdateLiabilityInput {
     name: row.name,
     liabilityType: row.liabilityType ?? "",
     currency: (row.currency ?? "USD") as UpdateLiabilityInput["currency"],
+    trackingMode: (row.trackingMode ?? "fixed_installment") as UpdateLiabilityInput["trackingMode"],
     currentBalance: Number(row.currentBalance),
     securedByAssetId: row.securedByAssetId ?? "",
   }
@@ -1056,10 +1059,34 @@ function LiabilityFormFields({
         name="currentBalance"
         render={({ field }) => (
           <FormItem>
-            <FormLabel>Principal owed</FormLabel>
+            <FormLabel>Amount still owed</FormLabel>
             <FormControl>
               <Input type="number" step="1" min={0} {...field} />
             </FormControl>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+      <FormField
+        control={control}
+        name="trackingMode"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Tracking mode</FormLabel>
+            <Select onValueChange={field.onChange} value={field.value}>
+              <FormControl>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+              </FormControl>
+              <SelectContent>
+                {LIABILITY_TRACKING_MODES.map((mode) => (
+                  <SelectItem key={mode} value={mode}>
+                    {mode === "fixed_installment" ? "Fixed installment" : "Revolving"}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <FormMessage />
           </FormItem>
         )}
@@ -1110,6 +1137,7 @@ function AddLiabilityDialog({
       name: "",
       liabilityType: "",
       currency: "USD",
+      trackingMode: "fixed_installment",
       currentBalance: 0,
       securedByAssetId: "",
     },
@@ -1124,6 +1152,7 @@ function AddLiabilityDialog({
         name: "",
         liabilityType: "",
         currency: "USD",
+        trackingMode: "fixed_installment",
         currentBalance: 0,
         securedByAssetId: "",
       })

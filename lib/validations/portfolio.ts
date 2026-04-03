@@ -4,6 +4,8 @@ import { BUDGET_SUMMARY_CURRENCIES } from "@/lib/budget/summary-currency"
 import { supportedCurrencySchema } from "@/lib/currency/iso4217"
 
 const budgetSummaryCurrencySchema = z.enum(BUDGET_SUMMARY_CURRENCIES)
+export const LIABILITY_TRACKING_MODES = ["fixed_installment", "revolving"] as const
+const liabilityTrackingModeSchema = z.enum(LIABILITY_TRACKING_MODES)
 
 const dateOpt = z
   .string()
@@ -129,6 +131,7 @@ const liabilityObject = z.object({
       return t === "" || t == null ? undefined : t
     }),
   currency: supportedCurrencySchema,
+  trackingMode: liabilityTrackingModeSchema.default("fixed_installment"),
   currentBalance: z.coerce.number().min(0),
   securedByAssetId: optionalSecuredAssetId,
 })

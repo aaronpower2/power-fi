@@ -1,6 +1,6 @@
 import type { ChartPoint } from "./types"
 
-/** Subtract a constant (e.g. total liabilities in goal currency) from every projected total. v1: debt held flat through horizon. */
+/** Subtract a constant offset from every projected total. */
 export function subtractConstantFromChartPoints(
   points: ChartPoint[],
   offsetGoalCcy: number,
@@ -9,5 +9,16 @@ export function subtractConstantFromChartPoints(
   return points.map((p) => ({
     ...p,
     projectedTotal: p.projectedTotal - offsetGoalCcy,
+  }))
+}
+
+/** Subtract a month-by-month liability path from the gross projected series. */
+export function subtractSeriesFromChartPoints(
+  points: ChartPoint[],
+  offsetsGoalCcy: number[],
+): ChartPoint[] {
+  return points.map((p, i) => ({
+    ...p,
+    projectedTotal: p.projectedTotal - (offsetsGoalCcy[i] ?? 0),
   }))
 }

@@ -10,6 +10,7 @@ import {
   Target,
 } from "lucide-react"
 
+import { dashboardRoutes } from "@/lib/routes"
 import { SidebarThemeSwitcher } from "@/components/theme-switcher"
 import {
   Sidebar,
@@ -25,10 +26,10 @@ import {
 } from "@/components/ui/sidebar"
 
 const nav = [
-  { href: "/summary", label: "FI Summary", icon: LayoutDashboard },
-  { href: "/portfolio", label: "Portfolio", icon: PieChart },
-  { href: "/goal", label: "Goal", icon: Target },
-  { href: "/budget", label: "Budget", icon: Wallet },
+  { href: dashboardRoutes.fiSummary, label: "FI Summary", icon: LayoutDashboard },
+  { href: dashboardRoutes.cashFlow, label: "Cash Flow", icon: Wallet },
+  { href: dashboardRoutes.goal, label: "Goal", icon: Target },
+  { href: dashboardRoutes.netWorth, label: "Net Worth", icon: PieChart },
 ] as const
 
 export function AppSidebar() {
@@ -38,7 +39,7 @@ export function AppSidebar() {
     <Sidebar variant="floating" collapsible="icon">
       <SidebarHeader className="items-start px-3 py-3">
         <Link
-          href="/summary"
+          href={dashboardRoutes.fiSummary}
           className="flex w-full min-w-0 items-center justify-start rounded-md pl-1 pt-1 ring-sidebar-ring outline-none focus-visible:ring-2"
         >
           <Image

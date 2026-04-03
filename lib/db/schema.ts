@@ -3,6 +3,7 @@ import {
   boolean,
   check,
   date,
+  index,
   integer,
   jsonb,
   numeric,
@@ -119,8 +120,12 @@ export const liabilities = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     name: varchar("name", { length: 256 }).notNull(),
     liabilityType: varchar("liability_type", { length: 128 }),
+    /** `fixed_installment` declines as linked debt-service payments are posted; revolving debt stays manual. */
+    trackingMode: varchar("tracking_mode", { length: 32 })
+      .notNull()
+      .default("fixed_installment"),
     currency: varchar("currency", { length: 3 }).notNull().default("USD"),
-    /** Principal owed (positive number). */
+    /** Current remaining owed (positive number). */
     currentBalance: numeric("current_balance", { precision: 16, scale: 2 })
       .notNull()
       .default("0"),
@@ -158,21 +163,30 @@ export const incomeLines = pgTable("income_lines", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 })
 
-export const incomeRecords = pgTable("income_records", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  incomeLineId: uuid("income_line_id")
-    .notNull()
-    .references(() => incomeLines.id, { onDelete: "cascade" }),
-  amount: numeric("amount", { precision: 16, scale: 2 }).notNull(),
-  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
-  occurredOn: date("occurred_on").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-})
+export const incomeRecords = pgTable(
+  "income_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    incomeLineId: uuid("income_line_id")
+      .notNull()
+      .references(() => incomeLines.id, { onDelete: "cascade" }),
+    amount: numeric("amount", { precision: 16, scale: 2 }).notNull(),
+    currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+    occurredOn: date("occurred_on").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("income_records_occurred_on_idx").on(t.occurredOn)],
+)
 
 export const expenseCategories = pgTable("expense_categories", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: varchar("name", { length: 256 }).notNull(),
   sortOrder: integer("sort_order").notNull().default(0),
+  /** `expense` contributes to normal spending; `debt_payment` is a cash outflow that can reduce a linked liability. */
+  cashFlowType: varchar("cash_flow_type", { length: 32 }).notNull().default("expense"),
+  linkedLiabilityId: uuid("linked_liability_id").references(() => liabilities.id, {
+    onDelete: "set null",
+  }),
   /** Month-level planned envelope (smoothed monthly equivalent; no per-day anchor). */
   isRecurring: boolean("is_recurring").notNull().default(false),
   frequency: varchar("frequency", { length: 32 }),
@@ -231,17 +245,26 @@ export const budgetMonthPlanLines = pgTable(
   ],
 )
 
-export const expenseRecords = pgTable("expense_records", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  expenseCategoryId: uuid("expense_category_id")
-    .notNull()
-    .references(() => expenseCategories.id, { onDelete: "cascade" }),
-  expenseLineId: uuid("expense_line_id").references(() => expenseLines.id, { onDelete: "set null" }),
-  amount: numeric("amount", { precision: 16, scale: 2 }).notNull(),
-  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
-  occurredOn: date("occurred_on").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-})
+export const expenseRecords = pgTable(
+  "expense_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    expenseCategoryId: uuid("expense_category_id")
+      .notNull()
+      .references(() => expenseCategories.id, { onDelete: "cascade" }),
+    expenseLineId: uuid("expense_line_id").references(() => expenseLines.id, { onDelete: "set null" }),
+    appliedLiabilityId: uuid("applied_liability_id").references(() => liabilities.id, {
+      onDelete: "set null",
+    }),
+    /** Positive amount deducted from the linked liability when this record posts. */
+    appliedLiabilityAmount: numeric("applied_liability_amount", { precision: 16, scale: 2 }),
+    amount: numeric("amount", { precision: 16, scale: 2 }).notNull(),
+    currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+    occurredOn: date("occurred_on").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("expense_records_occurred_on_idx").on(t.occurredOn)],
+)
 
 /** Bulk bank/card import: one user upload session. */
 export const transactionImportBatches = pgTable("transaction_import_batches", {
@@ -252,20 +275,24 @@ export const transactionImportBatches = pgTable("transaction_import_batches", {
 })
 
 /** One file within a batch; binary stored on disk at `storagePath`. */
-export const transactionImportFiles = pgTable("transaction_import_files", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  batchId: uuid("batch_id")
-    .notNull()
-    .references(() => transactionImportBatches.id, { onDelete: "cascade" }),
-  originalName: varchar("original_name", { length: 512 }).notNull(),
-  mimeType: varchar("mime_type", { length: 128 }).notNull(),
-  byteSize: integer("byte_size").notNull(),
-  storagePath: varchar("storage_path", { length: 1024 }).notNull(),
-  parserKind: varchar("parser_kind", { length: 32 }).notNull().default("unknown"),
-  parseStatus: varchar("parse_status", { length: 32 }).notNull().default("pending"),
-  parseError: text("parse_error"),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-})
+export const transactionImportFiles = pgTable(
+  "transaction_import_files",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => transactionImportBatches.id, { onDelete: "cascade" }),
+    originalName: varchar("original_name", { length: 512 }).notNull(),
+    mimeType: varchar("mime_type", { length: 128 }).notNull(),
+    byteSize: integer("byte_size").notNull(),
+    storagePath: varchar("storage_path", { length: 1024 }).notNull(),
+    parserKind: varchar("parser_kind", { length: 32 }).notNull().default("unknown"),
+    parseStatus: varchar("parse_status", { length: 32 }).notNull().default("pending"),
+    parseError: text("parse_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("transaction_import_files_batch_created_idx").on(t.batchId, t.createdAt)],
+)
 
 /** Parsed row from a file; match fields filled by AI or user. */
 export const importedTransactions = pgTable(
@@ -313,7 +340,12 @@ export const importedTransactions = pgTable(
     postedRecordId: uuid("posted_record_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [uniqueIndex("imported_txn_batch_dedupe_uidx").on(t.batchId, t.dedupeHash)],
+  (t) => [
+    uniqueIndex("imported_txn_batch_dedupe_uidx").on(t.batchId, t.dedupeHash),
+    index("imported_txn_file_idx").on(t.fileId),
+    index("imported_txn_batch_status_date_idx").on(t.batchId, t.matchStatus, t.occurredOn),
+    index("imported_txn_batch_date_idx").on(t.batchId, t.occurredOn, t.id),
+  ],
 )
 
 /**
@@ -360,9 +392,8 @@ export const budgetMonthTransactions = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [
-    uniqueIndex("budget_month_txn_import_uidx")
-      .on(t.importedTransactionId)
-      .where(sql`${t.importedTransactionId} IS NOT NULL`),
+    uniqueIndex("budget_month_txn_import_uidx").on(t.importedTransactionId),
+    index("budget_month_txn_period_month_idx").on(t.periodMonth),
   ],
 )
 

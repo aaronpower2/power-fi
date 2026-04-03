@@ -1,7 +1,7 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
-import { asc, eq, max } from "drizzle-orm"
+import { asc, eq, inArray, max, sql } from "drizzle-orm"
 
 import { matchImportRowsWithAnthropic } from "@/lib/anthropic/import-matcher"
 import { loadImportFewShotExamples } from "@/lib/data/import-few-shot"
@@ -31,14 +31,19 @@ import { z } from "zod"
 
 import { getDefaultStatementCurrency } from "@/lib/data/import-currency"
 import {
+  type AppDbLike,
   syncLedgerByImportedTransactionId,
-  syncLedgerFromImportedTransaction,
+  syncLedgerFromImportedTransactions,
 } from "@/lib/data/budget-month-ledger"
-import { getImportBatchDetail, listRecentImportBatches } from "@/lib/data/import-transactions"
+import {
+  getImportBatchDetail,
+  listRecentImportBatches,
+} from "@/lib/data/import-transactions"
+import { dashboardRoutes } from "@/lib/routes"
 
-function rev() {
-  revalidatePath("/budget")
-  revalidatePath("/summary")
+function revalidatePostedViews() {
+  revalidatePath(dashboardRoutes.cashFlow)
+  revalidatePath(dashboardRoutes.fiSummary)
 }
 
 /**
@@ -142,11 +147,10 @@ export async function createImportBatch(formData: FormData): Promise<
     return err("All files were empty.")
   }
 
-  rev()
   return ok({ batchId: batch.id })
 }
 
-async function loadBudgetLineCatalog(db: NonNullable<ReturnType<typeof getDb>>) {
+async function loadBudgetLineCatalog(db: AppDbLike) {
   const cats = await db
     .select()
     .from(expenseCategories)
@@ -174,12 +178,102 @@ async function loadBudgetLineCatalog(db: NonNullable<ReturnType<typeof getDb>>) 
     expense_categories: cats.map((c) => ({
       id: c.id,
       name: c.name,
+      cash_flow_type: c.cashFlowType ?? "expense",
+      linked_liability_id: c.linkedLiabilityId ?? null,
       example_line_names: exampleLineNamesByCategory.get(c.id) ?? [],
     })),
     income_lines: incLines.map((l) => ({ id: l.id, name: l.name })),
     incomeLineIdSet: new Set(incLines.map((l) => l.id)),
     categoryIdSet: new Set(cats.map((c) => c.id)),
   }
+}
+
+type ImportedTransactionMutableState = Pick<
+  typeof importedTransactions.$inferSelect,
+  | "id"
+  | "direction"
+  | "suggestedExpenseCategoryId"
+  | "suggestedExpenseLineId"
+  | "suggestedIncomeLineId"
+  | "suggestedCategoryName"
+  | "suggestedLineName"
+  | "suggestedUseExistingCategoryId"
+  | "modelConfidence"
+  | "modelNotes"
+  | "matchStatus"
+  | "postedRecordKind"
+  | "postedRecordId"
+>
+
+function importedTransactionStateValueSql(row: ImportedTransactionMutableState) {
+  return sql`(
+    cast(${row.id} as uuid),
+    cast(${row.direction} as varchar),
+    cast(${row.suggestedExpenseCategoryId} as uuid),
+    cast(${row.suggestedExpenseLineId} as uuid),
+    cast(${row.suggestedIncomeLineId} as uuid),
+    cast(${row.suggestedCategoryName} as varchar),
+    cast(${row.suggestedLineName} as varchar),
+    cast(${row.suggestedUseExistingCategoryId} as uuid),
+    cast(${row.modelConfidence} as varchar),
+    cast(${row.modelNotes} as text),
+    cast(${row.matchStatus} as varchar),
+    cast(${row.postedRecordKind} as varchar),
+    cast(${row.postedRecordId} as uuid)
+  )`
+}
+
+async function updateImportedTransactionStates(
+  db: AppDbLike,
+  rows: readonly ImportedTransactionMutableState[],
+) {
+  if (rows.length === 0) return
+  const values = sql.join(rows.map(importedTransactionStateValueSql), sql`, `)
+  await db.execute(sql`
+    update ${importedTransactions} as imported_transactions
+    set
+      direction = v.direction,
+      suggested_expense_category_id = v.suggested_expense_category_id,
+      suggested_expense_line_id = v.suggested_expense_line_id,
+      suggested_income_line_id = v.suggested_income_line_id,
+      suggested_category_name = v.suggested_category_name,
+      suggested_line_name = v.suggested_line_name,
+      suggested_use_existing_category_id = v.suggested_use_existing_category_id,
+      model_confidence = v.model_confidence,
+      model_notes = v.model_notes,
+      match_status = v.match_status,
+      posted_record_kind = v.posted_record_kind,
+      posted_record_id = v.posted_record_id
+    from (
+      values ${values}
+    ) as v(
+      id,
+      direction,
+      suggested_expense_category_id,
+      suggested_expense_line_id,
+      suggested_income_line_id,
+      suggested_category_name,
+      suggested_line_name,
+      suggested_use_existing_category_id,
+      model_confidence,
+      model_notes,
+      match_status,
+      posted_record_kind,
+      posted_record_id
+    )
+    where ${importedTransactions.id} = v.id
+  `)
+}
+
+async function loadImportedTransactionsByIds(
+  db: AppDbLike,
+  ids: readonly string[],
+) {
+  if (ids.length === 0) return []
+  return db
+    .select()
+    .from(importedTransactions)
+    .where(inArray(importedTransactions.id, [...new Set(ids)]))
 }
 
 export async function parseImportBatch(batchId: string): Promise<ActionResult> {
@@ -197,7 +291,7 @@ export async function parseImportBatch(batchId: string): Promise<ActionResult> {
     .where(eq(transactionImportFiles.batchId, batchId))
     .orderBy(asc(transactionImportFiles.createdAt))
 
-  const statementCurrency = await getDefaultStatementCurrency()
+  const statementCurrency = getDefaultStatementCurrency()
 
   let anyFailed = false
   for (const file of files) {
@@ -227,45 +321,50 @@ export async function parseImportBatch(batchId: string): Promise<ActionResult> {
         throw new Error("Unsupported file type. Use PDF, CSV, XLS, or XLSX.")
       }
 
-      for (const row of rows) {
-        const dedupeHash = importRowDedupeHash({
+      const stagedValues = rows.map((row) => ({
+        batchId,
+        fileId: file.id,
+        occurredOn: row.occurredOn,
+        amount: row.amount.toFixed(2),
+        currency: row.currency,
+        description: row.description,
+        rawPayload: row.rawPayload,
+        dedupeHash: importRowDedupeHash({
           occurredOn: row.occurredOn,
           amount: row.amount,
           description: row.description,
           fileId: file.id,
           parserRowIndex: row.parserRowIndex,
-        })
-        await db
-          .insert(importedTransactions)
-          .values({
-            batchId,
-            fileId: file.id,
-            occurredOn: row.occurredOn,
-            amount: row.amount.toFixed(2),
-            currency: row.currency,
-            description: row.description,
-            rawPayload: row.rawPayload,
-            dedupeHash,
-            parserRowIndex: row.parserRowIndex,
-            matchStatus: "pending",
-          })
-          .onConflictDoNothing({
-            target: [importedTransactions.batchId, importedTransactions.dedupeHash],
-          })
-      }
+        }),
+        parserRowIndex: row.parserRowIndex,
+        matchStatus: "pending" as const,
+      }))
+
+      const insertedRows =
+        stagedValues.length === 0
+          ? []
+          : await db
+              .insert(importedTransactions)
+              .values(stagedValues)
+              .onConflictDoNothing({
+                target: [importedTransactions.batchId, importedTransactions.dedupeHash],
+              })
+              .returning()
+
+      const ledgerRows =
+        insertedRows.length === stagedValues.length
+          ? insertedRows
+          : await db
+              .select()
+              .from(importedTransactions)
+              .where(eq(importedTransactions.fileId, file.id))
+
+      await syncLedgerFromImportedTransactions(db, ledgerRows)
 
       await db
         .update(transactionImportFiles)
         .set({ parseStatus: "parsed", parseError: null })
         .where(eq(transactionImportFiles.id, file.id))
-
-      const fileTxRows = await db
-        .select()
-        .from(importedTransactions)
-        .where(eq(importedTransactions.fileId, file.id))
-      for (const r of fileTxRows) {
-        await syncLedgerFromImportedTransaction(db, r)
-      }
     } catch (e) {
       anyFailed = true
       const msg = e instanceof Error ? e.message : String(e)
@@ -281,7 +380,6 @@ export async function parseImportBatch(batchId: string): Promise<ActionResult> {
     .set({ status: anyFailed ? "parsed" : "parsed" })
     .where(eq(transactionImportBatches.id, batchId))
 
-  rev()
   return ok()
 }
 
@@ -312,7 +410,6 @@ export async function runAnthropicMatch(batchId: string): Promise<ActionResult> 
       .update(transactionImportBatches)
       .set({ status: "ready" })
       .where(eq(transactionImportBatches.id, batchId))
-    rev()
     return ok()
   }
 
@@ -335,6 +432,7 @@ export async function runAnthropicMatch(batchId: string): Promise<ActionResult> 
       return { chunk, matches }
     })
 
+    const updates: ImportedTransactionMutableState[] = []
     for (const { chunk, matches } of chunkResults) {
       const byId = new Map(matches.map((m) => [m.staging_id, m]))
 
@@ -344,7 +442,7 @@ export async function runAnthropicMatch(batchId: string): Promise<ActionResult> 
 
         const direction = m.kind
         let suggestedExpenseCategoryId: string | null = null
-        let suggestedExpenseLineId: string | null = null
+        const suggestedExpenseLineId: string | null = null
         let suggestedIncomeLineId: string | null = null
         let suggestedCategoryName: string | null = null
         let matchStatus: string = "pending"
@@ -369,31 +467,36 @@ export async function runAnthropicMatch(batchId: string): Promise<ActionResult> 
           }
         }
 
-        await db
-          .update(importedTransactions)
-          .set({
-            direction,
-            suggestedExpenseCategoryId,
-            suggestedExpenseLineId,
-            suggestedIncomeLineId,
-            suggestedCategoryName,
-            suggestedLineName: null,
-            suggestedUseExistingCategoryId: null,
-            modelConfidence: conf,
-            modelNotes: notes,
-            matchStatus,
-          })
-          .where(eq(importedTransactions.id, t.id))
-        await syncLedgerByImportedTransactionId(db, t.id)
+        updates.push({
+          id: t.id,
+          direction,
+          suggestedExpenseCategoryId,
+          suggestedExpenseLineId,
+          suggestedIncomeLineId,
+          suggestedCategoryName,
+          suggestedLineName: null,
+          suggestedUseExistingCategoryId: null,
+          modelConfidence: conf,
+          modelNotes: notes,
+          matchStatus,
+          postedRecordKind: t.postedRecordKind,
+          postedRecordId: t.postedRecordId,
+        })
       }
     }
+
+    await updateImportedTransactionStates(db, updates)
+    const updatedRows = await loadImportedTransactionsByIds(
+      db,
+      updates.map((row) => row.id),
+    )
+    await syncLedgerFromImportedTransactions(db, updatedRows)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     await db
       .update(transactionImportBatches)
       .set({ status: "failed" })
       .where(eq(transactionImportBatches.id, batchId))
-    rev()
     return err(msg)
   }
 
@@ -401,7 +504,6 @@ export async function runAnthropicMatch(batchId: string): Promise<ActionResult> 
     .update(transactionImportBatches)
     .set({ status: "ready" })
     .where(eq(transactionImportBatches.id, batchId))
-  rev()
   return ok()
 }
 
@@ -492,7 +594,7 @@ export async function acceptImportMatch(input: unknown): Promise<ActionResult> {
     await syncLedgerByImportedTransactionId(db, importedTransactionId)
   }
 
-  rev()
+  revalidatePostedViews()
   return ok()
 }
 
@@ -571,7 +673,7 @@ export async function acceptNewCategoryAndPost(input: unknown): Promise<ActionRe
     return err(e instanceof Error ? e.message : String(e))
   }
 
-  rev()
+  revalidatePostedViews()
   return ok()
 }
 
@@ -582,7 +684,6 @@ export async function dismissImportedTransaction(id: string): Promise<ActionResu
     .update(importedTransactions)
     .set({ matchStatus: "rejected" })
     .where(eq(importedTransactions.id, id))
-  rev()
   return ok()
 }
 
@@ -592,7 +693,6 @@ export async function deleteImportBatch(batchId: string): Promise<ActionResult> 
   await db
     .delete(transactionImportBatches)
     .where(eq(transactionImportBatches.id, batchId))
-  rev()
   return ok()
 }
 
@@ -601,8 +701,33 @@ export async function listImportBatchesAction() {
   return ok(rows)
 }
 
-export async function getImportBatchDetailAction(batchId: string) {
-  const d = await getImportBatchDetail(batchId)
+const importBatchFilterOptions = [
+  "all",
+  "pending",
+  "suggested_line",
+  "needs_new_line",
+  "posted",
+  "rejected",
+] as const
+
+const importBatchDetailSchema = z.union([
+  z.string().uuid().transform((batchId) => ({ batchId })),
+  z.object({
+    batchId: z.string().uuid(),
+    filter: z.enum(importBatchFilterOptions).optional(),
+    limit: z.number().int().min(1).max(250).optional(),
+    offset: z.number().int().min(0).optional(),
+  }),
+])
+
+export async function getImportBatchDetailAction(input: unknown) {
+  const parsed = importBatchDetailSchema.safeParse(input)
+  if (!parsed.success) return err(parsed.error.issues.map((i) => i.message).join(" "))
+  const batchId = parsed.data.batchId
+  const filter = "filter" in parsed.data ? parsed.data.filter : undefined
+  const limit = "limit" in parsed.data ? parsed.data.limit : undefined
+  const offset = "offset" in parsed.data ? parsed.data.offset : undefined
+  const d = await getImportBatchDetail(batchId, { filter, limit, offset })
   if (!d) {
     return err(
       "Batch not found, or import tables are missing. If you have not run migrations yet: pnpm db:migrate",
@@ -658,4 +783,282 @@ export async function acceptSuggestedMatchFromImport(
     })
   }
   return err("No suggested match on this row")
+}
+
+type PreparedSuggestedPost =
+  | {
+      row: typeof importedTransactions.$inferSelect
+      kind: "expense"
+      expenseCategoryId: string
+    }
+  | {
+      row: typeof importedTransactions.$inferSelect
+      kind: "income"
+      incomeLineId: string
+    }
+  | {
+      row: typeof importedTransactions.$inferSelect
+      kind: "new_category"
+      categoryId: string | null
+      categoryName: string
+    }
+
+function pushBulkPostError(errors: string[], message: string) {
+  if (errors.length < 8) errors.push(message)
+}
+
+async function postSuggestedImportRows(
+  db: AppDbLike,
+  rows: readonly (typeof importedTransactions.$inferSelect)[],
+) {
+  const catalog = await loadBudgetLineCatalog(db)
+  const prepared: PreparedSuggestedPost[] = []
+  const errors: string[] = []
+  let failed = 0
+
+  for (const row of rows) {
+    if (row.postedRecordId) continue
+
+    if (row.matchStatus === "suggested_line") {
+      if (row.suggestedExpenseCategoryId) {
+        if (!catalog.categoryIdSet.has(row.suggestedExpenseCategoryId)) {
+          failed += 1
+          pushBulkPostError(errors, "Invalid expense category")
+          continue
+        }
+        prepared.push({
+          row,
+          kind: "expense",
+          expenseCategoryId: row.suggestedExpenseCategoryId,
+        })
+        continue
+      }
+      if (row.suggestedIncomeLineId) {
+        if (!catalog.incomeLineIdSet.has(row.suggestedIncomeLineId)) {
+          failed += 1
+          pushBulkPostError(errors, "Invalid income line")
+          continue
+        }
+        prepared.push({
+          row,
+          kind: "income",
+          incomeLineId: row.suggestedIncomeLineId,
+        })
+        continue
+      }
+      failed += 1
+      pushBulkPostError(errors, "No suggested match on this row")
+      continue
+    }
+
+    const existingCategoryId = row.suggestedExpenseCategoryId
+    if (existingCategoryId) {
+      if (!catalog.categoryIdSet.has(existingCategoryId)) {
+        failed += 1
+        pushBulkPostError(errors, "Invalid expense category")
+        continue
+      }
+      prepared.push({
+        row,
+        kind: "expense",
+        expenseCategoryId: existingCategoryId,
+      })
+      continue
+    }
+
+    const categoryName = row.suggestedCategoryName?.trim()
+    if (!categoryName) {
+      failed += 1
+      pushBulkPostError(errors, "No suggested category on this row")
+      continue
+    }
+    prepared.push({
+      row,
+      kind: "new_category",
+      categoryId: null,
+      categoryName,
+    })
+  }
+
+  if (prepared.length === 0) {
+    return { posted: 0, failed, errors }
+  }
+
+  await db.transaction(async (tx) => {
+    const createdCategoryIdsByName = new Map<string, string>()
+    let nextSortOrder: number | null = null
+    const updates: ImportedTransactionMutableState[] = []
+    const incomeItems = prepared.filter(
+      (item): item is Extract<PreparedSuggestedPost, { kind: "income" }> => item.kind === "income",
+    )
+    const expenseItemsResolved: {
+      row: typeof importedTransactions.$inferSelect
+      expenseCategoryId: string
+    }[] = []
+
+    for (const item of prepared) {
+      if (item.kind === "income") continue
+      let expenseCategoryId =
+        item.kind === "expense" ? item.expenseCategoryId : item.categoryId
+      if (!expenseCategoryId) {
+        const categoryName = item.kind === "new_category" ? item.categoryName : "Imported"
+        const cacheKey = categoryName.trim().toLowerCase()
+        expenseCategoryId = createdCategoryIdsByName.get(cacheKey) ?? null
+        if (!expenseCategoryId) {
+          if (nextSortOrder == null) {
+            const [maxRow] = await tx
+              .select({ m: max(expenseCategories.sortOrder) })
+              .from(expenseCategories)
+            nextSortOrder = Number(maxRow?.m ?? -1) + 1
+          }
+          const [cat] = await tx
+            .insert(expenseCategories)
+            .values({
+              name: categoryName.slice(0, 256),
+              sortOrder: nextSortOrder,
+            })
+            .returning({ id: expenseCategories.id })
+          createdCategoryIdsByName.set(cacheKey, cat.id)
+          expenseCategoryId = cat.id
+          nextSortOrder += 1
+        }
+      }
+      expenseItemsResolved.push({
+        row: item.row,
+        expenseCategoryId,
+      })
+    }
+
+    if (incomeItems.length > 0) {
+      const insertedIncome = await tx
+        .insert(incomeRecords)
+        .values(
+          incomeItems.map((item) => ({
+            incomeLineId: item.incomeLineId,
+            amount: normalizedPostedRecordAmount(item.row.amount),
+            currency: item.row.currency,
+            occurredOn: item.row.occurredOn,
+          })),
+        )
+        .returning({ id: incomeRecords.id })
+
+      for (let i = 0; i < incomeItems.length; i += 1) {
+        const item = incomeItems[i]!
+        const rec = insertedIncome[i]!
+        updates.push({
+          id: item.row.id,
+          direction: "income",
+          suggestedExpenseCategoryId: null,
+          suggestedExpenseLineId: null,
+          suggestedIncomeLineId: item.incomeLineId,
+          suggestedCategoryName: null,
+          suggestedLineName: null,
+          suggestedUseExistingCategoryId: null,
+          modelConfidence: item.row.modelConfidence,
+          modelNotes: item.row.modelNotes,
+          matchStatus: "posted",
+          postedRecordKind: "income",
+          postedRecordId: rec.id,
+        })
+      }
+    }
+
+    if (expenseItemsResolved.length > 0) {
+      const insertedExpense = await tx
+        .insert(expenseRecords)
+        .values(
+          expenseItemsResolved.map((item) => ({
+            expenseCategoryId: item.expenseCategoryId,
+            expenseLineId: null,
+            amount: normalizedPostedRecordAmount(item.row.amount),
+            currency: item.row.currency,
+            occurredOn: item.row.occurredOn,
+          })),
+        )
+        .returning({ id: expenseRecords.id })
+
+      for (let i = 0; i < expenseItemsResolved.length; i += 1) {
+        const item = expenseItemsResolved[i]!
+        const rec = insertedExpense[i]!
+        updates.push({
+          id: item.row.id,
+          direction: "expense",
+          suggestedExpenseCategoryId: item.expenseCategoryId,
+          suggestedExpenseLineId: null,
+          suggestedIncomeLineId: null,
+          suggestedCategoryName: null,
+          suggestedLineName: null,
+          suggestedUseExistingCategoryId: null,
+          modelConfidence: item.row.modelConfidence,
+          modelNotes: item.row.modelNotes,
+          matchStatus: "posted",
+          postedRecordKind: "expense",
+          postedRecordId: rec.id,
+        })
+      }
+    }
+
+    await updateImportedTransactionStates(tx, updates)
+    const updatedRows = await loadImportedTransactionsByIds(
+      tx,
+      updates.map((row) => row.id),
+    )
+    await syncLedgerFromImportedTransactions(tx, updatedRows)
+  })
+
+  return { posted: prepared.length, failed, errors }
+}
+
+const bulkSuggestedSchema = z.object({
+  batchId: z.string().uuid(),
+  /** matched = suggested_line only; all = suggested_line + needs_new_line */
+  scope: z.enum(["matched", "all"]),
+})
+
+/**
+ * Post many import rows in one request using AI suggestions (no manual pick list).
+ * `matched`: rows already mapped to an existing category or income line.
+ * `all`: also posts `needs_new_line` rows using the suggested new category name / id.
+ */
+export async function acceptBulkSuggestedFromImport(
+  input: unknown,
+): Promise<ActionResult<{ posted: number; failed: number; errors: string[] }>> {
+  const db = getDb()
+  if (!db) return err("Database not configured (set DATABASE_URL).")
+  const parsed = bulkSuggestedSchema.safeParse(input)
+  if (!parsed.success) return err(parsed.error.issues.map((i) => i.message).join(" "))
+
+  const { batchId, scope } = parsed.data
+
+  const [batch] = await db
+    .select({ id: transactionImportBatches.id })
+    .from(transactionImportBatches)
+    .where(eq(transactionImportBatches.id, batchId))
+    .limit(1)
+  if (!batch) return err("Batch not found")
+
+  const rows = await db
+    .select()
+    .from(importedTransactions)
+    .where(eq(importedTransactions.batchId, batchId))
+    .orderBy(asc(importedTransactions.occurredOn), asc(importedTransactions.id))
+
+  const eligible = rows.filter((t) => {
+    if (t.postedRecordId) return false
+    if (scope === "matched") return t.matchStatus === "suggested_line"
+    return t.matchStatus === "suggested_line" || t.matchStatus === "needs_new_line"
+  })
+
+  if (eligible.length === 0) {
+    return ok({ posted: 0, failed: 0, errors: [] })
+  }
+
+  try {
+    const result = await postSuggestedImportRows(db, eligible)
+    revalidatePostedViews()
+    return ok(result)
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e)
+    return err(message)
+  }
 }

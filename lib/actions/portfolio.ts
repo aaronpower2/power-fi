@@ -1,12 +1,12 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
-import { eq, sql } from "drizzle-orm"
+import { and, desc, eq, gte, lte, sql } from "drizzle-orm"
 
 import { err, ok, type ActionResult } from "@/lib/action-result"
+import { resolveBudgetSummaryCurrency } from "@/lib/budget/summary-currency"
 import { convertAmount } from "@/lib/currency/convert"
 import { loadRatesOnOrBefore } from "@/lib/currency/rates"
-import { getBudgetPageData } from "@/lib/data/budget"
 import {
   parseYearMonthYm,
   utcIsoDateString,
@@ -18,6 +18,9 @@ import {
   allocationStrategies,
   allocationTargets,
   assets,
+  expenseRecords,
+  goals,
+  incomeRecords,
   liabilities,
 } from "@/lib/db/schema"
 import {
@@ -32,10 +35,26 @@ import {
   updateLiabilitySchema,
   updateStrategySchema,
 } from "@/lib/validations/portfolio"
+import { dashboardRoutes } from "@/lib/routes"
 
 function rev() {
-  revalidatePath("/portfolio")
-  revalidatePath("/summary")
+  revalidatePath(dashboardRoutes.netWorth)
+  revalidatePath(dashboardRoutes.fiSummary)
+}
+
+function sumConvertedRecordAmounts(args: {
+  rows: { amount: string; currency: string | null }[]
+  reportingCurrency: string
+  rates: Map<string, number>
+}): number | null {
+  const { rows, reportingCurrency, rates } = args
+  let total = 0
+  for (const row of rows) {
+    const converted = convertAmount(Number(row.amount), row.currency ?? "USD", reportingCurrency, rates)
+    if (converted == null) return null
+    total += converted
+  }
+  return total
 }
 
 function toDbAsset(v: {
@@ -142,6 +161,7 @@ export async function createLiability(input: unknown): Promise<ActionResult<{ id
       .values({
         name: v.name,
         liabilityType: v.liabilityType?.trim() || null,
+        trackingMode: v.trackingMode,
         currency: v.currency,
         currentBalance: v.currentBalance.toFixed(2),
         securedByAssetId,
@@ -178,6 +198,7 @@ export async function updateLiability(input: unknown): Promise<ActionResult> {
       .set({
         name: rest.name,
         liabilityType: rest.liabilityType?.trim() || null,
+        trackingMode: rest.trackingMode,
         currency: rest.currency,
         currentBalance: rest.currentBalance.toFixed(2),
         securedByAssetId,
@@ -361,25 +382,71 @@ export async function allocateInvestablePerStrategy(
   }
 
   const { yearMonth, summaryCurrency, weights: weightsOverride } = parsed.data
-  const budget = await getBudgetPageData({
-    yearMonth,
-    summaryCurrency,
-  })
+  const ymParts = parseYearMonthYm(yearMonth)
+  if (!ymParts) {
+    return err("Invalid month.")
+  }
+  const { start, end: allocatedOn } = utcMonthBoundsForCalendarMonth(
+    ymParts.year,
+    ymParts.monthIndex0,
+  )
 
-  if (budget.ym !== yearMonth) {
-    return err("Could not load that budget month.")
+  const [activeGoalRows, incomeRows, expenseRows, fx, stratRows] = await Promise.all([
+    db
+      .select({ currency: goals.currency })
+      .from(goals)
+      .where(eq(goals.isActive, true))
+      .orderBy(desc(goals.updatedAt))
+      .limit(1),
+    db
+      .select({ amount: incomeRecords.amount, currency: incomeRecords.currency })
+      .from(incomeRecords)
+      .where(and(gte(incomeRecords.occurredOn, start), lte(incomeRecords.occurredOn, allocatedOn))),
+    db
+      .select({ amount: expenseRecords.amount, currency: expenseRecords.currency })
+      .from(expenseRecords)
+      .where(and(gte(expenseRecords.occurredOn, start), lte(expenseRecords.occurredOn, allocatedOn))),
+    loadRatesOnOrBefore(db, utcIsoDateString(new Date())),
+    db
+      .select()
+      .from(allocationStrategies)
+      .where(eq(allocationStrategies.isActive, true))
+      .limit(1),
+  ])
+
+  const reportingCurrency = resolveBudgetSummaryCurrency(
+    summaryCurrency,
+    activeGoalRows[0]?.currency ?? "AED",
+  )
+
+  if (!fx) {
+    return err("FX rates unavailable; cannot convert to asset currencies.")
   }
 
-  const investable = budget.totals.investableActual
+  const incomeTotal = sumConvertedRecordAmounts({
+    rows: incomeRows,
+    reportingCurrency,
+    rates: fx.rates,
+  })
+  if (incomeTotal == null) {
+    return err(`Could not convert some income rows to ${reportingCurrency}.`)
+  }
+
+  const expenseTotal = sumConvertedRecordAmounts({
+    rows: expenseRows,
+    reportingCurrency,
+    rates: fx.rates,
+  })
+  if (expenseTotal == null) {
+    return err(`Could not convert some expense rows to ${reportingCurrency}.`)
+  }
+
+  const investable = Math.max(0, incomeTotal - expenseTotal)
   if (investable <= 0) {
     return err("No investable amount for this month (income minus expenses).")
   }
 
-  const [strat] = await db
-    .select()
-    .from(allocationStrategies)
-    .where(eq(allocationStrategies.isActive, true))
-    .limit(1)
+  const strat = stratRows[0]
 
   if (!strat) {
     return err("No active portfolio strategy.")
@@ -439,20 +506,6 @@ export async function allocateInvestablePerStrategy(
     return err("Allocation weights must sum to a positive total.")
   }
 
-  const ymParts = parseYearMonthYm(yearMonth)
-  if (!ymParts) {
-    return err("Invalid month.")
-  }
-  const { end: allocatedOn } = utcMonthBoundsForCalendarMonth(
-    ymParts.year,
-    ymParts.monthIndex0,
-  )
-
-  const fx = await loadRatesOnOrBefore(db, utcIsoDateString(new Date()))
-  if (!fx) {
-    return err("FX rates unavailable; cannot convert to asset currencies.")
-  }
-
   const n = splitTargets.length
   const rawShares = splitTargets.map((t) => investable * (t.weightPercent / sumW))
   const cents = rawShares.map((x) => Math.round(x * 100))
@@ -462,37 +515,39 @@ export async function allocateInvestablePerStrategy(
   const sharesReporting = cents.map((c) => c / 100)
 
   try {
-    let created = 0
-    await db.transaction(async (tx) => {
-      for (let i = 0; i < splitTargets.length; i++) {
-        const shareReporting = sharesReporting[i]!
-        if (shareReporting <= 0) continue
-        const assetCcy = splitTargets[i]!.currency ?? "USD"
-        const inAsset = convertAmount(shareReporting, summaryCurrency, assetCcy, fx.rates)
-        if (inAsset == null) {
-          throw new Error(
-            `Could not convert ${summaryCurrency} to ${assetCcy} for an asset. Check FX pairs.`,
-          )
-        }
-        const amt = Math.round(inAsset * 100) / 100
-        if (amt <= 0) continue
-        await tx.insert(allocationRecords).values({
-          assetId: splitTargets[i]!.assetId,
+    const rowsToInsert = splitTargets.flatMap((target, i) => {
+      const shareReporting = sharesReporting[i]!
+      if (shareReporting <= 0) return []
+      const assetCcy = target.currency ?? "USD"
+      const inAsset = convertAmount(shareReporting, reportingCurrency, assetCcy, fx.rates)
+      if (inAsset == null) {
+        throw new Error(
+          `Could not convert ${reportingCurrency} to ${assetCcy} for an asset. Check FX pairs.`,
+        )
+      }
+      const amt = Math.round(inAsset * 100) / 100
+      if (amt <= 0) return []
+      return [
+        {
+          assetId: target.assetId,
           amount: amt.toFixed(2),
           allocatedOn,
           createdAt: new Date(),
-        })
-        created += 1
-      }
+        },
+      ]
     })
 
-    if (created === 0) {
+    if (rowsToInsert.length === 0) {
       return err("All split amounts rounded to zero in asset currencies.")
     }
 
-    revalidatePath("/budget")
+    await db.transaction(async (tx) => {
+      await tx.insert(allocationRecords).values(rowsToInsert)
+    })
+
+    revalidatePath(dashboardRoutes.cashFlow)
     rev()
-    return ok({ created })
+    return ok({ created: rowsToInsert.length })
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Allocation failed."
     return err(msg)

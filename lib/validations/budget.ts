@@ -9,6 +9,8 @@ const dateStr = z
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD")
 
 const budgetRecurringFrequencySchema = z.enum(BUDGET_RECURRING_FREQUENCIES)
+export const CASH_FLOW_TYPES = ["expense", "debt_payment"] as const
+const cashFlowTypeSchema = z.enum(CASH_FLOW_TYPES)
 
 const incomeLineFields = z.object({
   name: z.string().min(1).max(256),
@@ -96,6 +98,11 @@ export const updateIncomeRecordSchema = incomeRecordSchema.extend({
 const expenseCategoryFields = z.object({
   name: z.string().min(1).max(256),
   sortOrder: z.coerce.number().int().default(0),
+  cashFlowType: cashFlowTypeSchema.default("expense"),
+  linkedLiabilityId: z
+    .union([z.string().uuid(), z.literal("")])
+    .optional()
+    .transform((v) => (v === "" || v == null ? undefined : v)),
   isRecurring: z.boolean().default(false),
   frequency: budgetRecurringFrequencySchema.optional().nullable(),
   recurringAmount: z.coerce.number().optional().nullable(),
@@ -103,6 +110,13 @@ const expenseCategoryFields = z.object({
 })
 
 const expenseCategoryRefined = expenseCategoryFields.superRefine((data, ctx) => {
+  if (data.cashFlowType === "debt_payment" && !data.linkedLiabilityId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Choose a linked liability for debt-payment categories",
+      path: ["linkedLiabilityId"],
+    })
+  }
   if (data.isRecurring) {
     if (data.frequency == null) {
       ctx.addIssue({
@@ -125,6 +139,8 @@ const expenseCategoryRefined = expenseCategoryFields.superRefine((data, ctx) => 
 export const expenseCategorySchema = expenseCategoryRefined.transform((data) => ({
   name: data.name,
   sortOrder: data.sortOrder,
+  cashFlowType: data.cashFlowType,
+  linkedLiabilityId: data.cashFlowType === "debt_payment" ? data.linkedLiabilityId ?? null : null,
   isRecurring: data.isRecurring,
   frequency: data.isRecurring ? data.frequency! : null,
   recurringAmount: data.isRecurring ? data.recurringAmount! : null,
@@ -158,6 +174,8 @@ export const updateExpenseCategorySchema = updateExpenseCategoryInput.transform(
   id: data.id,
   name: data.name,
   sortOrder: data.sortOrder,
+  cashFlowType: data.cashFlowType,
+  linkedLiabilityId: data.cashFlowType === "debt_payment" ? data.linkedLiabilityId ?? null : null,
   isRecurring: data.isRecurring,
   frequency: data.isRecurring ? data.frequency! : null,
   recurringAmount: data.isRecurring ? data.recurringAmount! : null,

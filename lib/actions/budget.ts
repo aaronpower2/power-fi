@@ -1,7 +1,7 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
-import { eq } from "drizzle-orm"
+import { eq, sql } from "drizzle-orm"
 import { z } from "zod"
 
 import { err, ok, type ActionResult } from "@/lib/action-result"
@@ -19,6 +19,7 @@ import {
   expenseRecords,
   incomeLines,
   incomeRecords,
+  liabilities,
 } from "@/lib/db/schema"
 import {
   expenseCategorySchema,
@@ -32,14 +33,82 @@ import {
   updateIncomeLineSchema,
   updateIncomeRecordSchema,
 } from "@/lib/validations/budget"
+import { dashboardRoutes } from "@/lib/routes"
 
 function rev() {
-  revalidatePath("/budget")
-  revalidatePath("/summary")
+  revalidatePath(dashboardRoutes.cashFlow)
+  revalidatePath(dashboardRoutes.fiSummary)
 }
 
 function parseIssues(e: { issues: { message: string }[] }) {
   return e.issues.map((i: { message: string }) => i.message).join(" ")
+}
+
+type AppDb = NonNullable<ReturnType<typeof getDb>>
+type AppTx = Parameters<Parameters<AppDb["transaction"]>[0]>[0]
+
+async function reverseExpenseRecordLiability(
+  tx: AppTx,
+  row: {
+    appliedLiabilityId?: string | null
+    appliedLiabilityAmount?: string | null
+  },
+) {
+  if (!row.appliedLiabilityId) return
+  const applied = Number(row.appliedLiabilityAmount ?? 0)
+  if (!Number.isFinite(applied) || applied <= 0) return
+  await tx
+    .update(liabilities)
+    .set({
+      currentBalance: sql`${liabilities.currentBalance} + ${applied.toFixed(2)}`,
+      updatedAt: new Date(),
+    })
+    .where(eq(liabilities.id, row.appliedLiabilityId))
+}
+
+async function applyExpenseRecordLiability(
+  tx: AppTx,
+  expenseCategoryId: string,
+  amount: number,
+): Promise<{ appliedLiabilityId: string | null; appliedLiabilityAmount: string | null }> {
+  const [category] = await tx
+    .select({
+      cashFlowType: expenseCategories.cashFlowType,
+      linkedLiabilityId: expenseCategories.linkedLiabilityId,
+      liabilityTrackingMode: liabilities.trackingMode,
+      liabilityCurrentBalance: liabilities.currentBalance,
+    })
+    .from(expenseCategories)
+    .leftJoin(liabilities, eq(expenseCategories.linkedLiabilityId, liabilities.id))
+    .where(eq(expenseCategories.id, expenseCategoryId))
+
+  if (!category) return { appliedLiabilityId: null, appliedLiabilityAmount: null }
+  if (
+    category.cashFlowType !== "debt_payment" ||
+    !category.linkedLiabilityId ||
+    category.liabilityTrackingMode !== "fixed_installment"
+  ) {
+    return { appliedLiabilityId: null, appliedLiabilityAmount: null }
+  }
+
+  const currentBalance = Number(category.liabilityCurrentBalance ?? 0)
+  const applied = Math.max(0, Math.min(currentBalance, amount))
+  if (applied <= 0) {
+    return { appliedLiabilityId: null, appliedLiabilityAmount: null }
+  }
+
+  await tx
+    .update(liabilities)
+    .set({
+      currentBalance: sql`GREATEST(${liabilities.currentBalance} - ${applied.toFixed(2)}, 0)`,
+      updatedAt: new Date(),
+    })
+    .where(eq(liabilities.id, category.linkedLiabilityId))
+
+  return {
+    appliedLiabilityId: category.linkedLiabilityId,
+    appliedLiabilityAmount: applied.toFixed(2),
+  }
 }
 
 export async function createIncomeLine(input: unknown): Promise<ActionResult<{ id: string }>> {
@@ -152,6 +221,8 @@ export async function createExpenseCategory(
     .values({
       name: v.name,
       sortOrder: v.sortOrder,
+      cashFlowType: v.cashFlowType,
+      linkedLiabilityId: v.linkedLiabilityId,
       isRecurring: v.isRecurring,
       frequency: v.frequency,
       recurringAmount:
@@ -174,6 +245,8 @@ export async function updateExpenseCategory(input: unknown): Promise<ActionResul
     .set({
       name: v.name,
       sortOrder: v.sortOrder,
+      cashFlowType: v.cashFlowType,
+      linkedLiabilityId: v.linkedLiabilityId,
       isRecurring: v.isRecurring,
       frequency: v.frequency,
       recurringAmount:
@@ -188,7 +261,20 @@ export async function updateExpenseCategory(input: unknown): Promise<ActionResul
 export async function deleteExpenseCategory(id: string): Promise<ActionResult> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
-  await db.delete(expenseCategories).where(eq(expenseCategories.id, id))
+  await db.transaction(async (tx) => {
+    const records = await tx
+      .select({
+        appliedLiabilityId: expenseRecords.appliedLiabilityId,
+        appliedLiabilityAmount: expenseRecords.appliedLiabilityAmount,
+      })
+      .from(expenseRecords)
+      .where(eq(expenseRecords.expenseCategoryId, id))
+
+    for (const row of records) {
+      await reverseExpenseRecordLiability(tx, row)
+    }
+    await tx.delete(expenseCategories).where(eq(expenseCategories.id, id))
+  })
   rev()
   return ok()
 }
@@ -241,16 +327,21 @@ export async function createExpenseRecord(input: unknown): Promise<ActionResult<
   const parsed = expenseRecordSchema.safeParse(input)
   if (!parsed.success) return err(parseIssues(parsed.error))
   const v = parsed.data
-  const [row] = await db
-    .insert(expenseRecords)
-    .values({
-      expenseCategoryId: v.expenseCategoryId,
-      expenseLineId: v.expenseLineId,
-      amount: v.amount.toFixed(2),
-      currency: v.currency,
-      occurredOn: v.occurredOn,
-    })
-    .returning({ id: expenseRecords.id })
+  const [row] = await db.transaction(async (tx) => {
+    const liabilityEffect = await applyExpenseRecordLiability(tx, v.expenseCategoryId, v.amount)
+    return tx
+      .insert(expenseRecords)
+      .values({
+        expenseCategoryId: v.expenseCategoryId,
+        expenseLineId: v.expenseLineId,
+        appliedLiabilityId: liabilityEffect.appliedLiabilityId,
+        appliedLiabilityAmount: liabilityEffect.appliedLiabilityAmount,
+        amount: v.amount.toFixed(2),
+        currency: v.currency,
+        occurredOn: v.occurredOn,
+      })
+      .returning({ id: expenseRecords.id })
+  })
   rev()
   return ok({ id: row.id })
 }
@@ -261,14 +352,29 @@ export async function updateExpenseRecord(input: unknown): Promise<ActionResult>
   const parsed = updateExpenseRecordSchema.safeParse(input)
   if (!parsed.success) return err(parseIssues(parsed.error))
   const v = parsed.data
-  await db
-    .update(expenseRecords)
-    .set({
-      amount: v.amount.toFixed(2),
-      currency: v.currency,
-      occurredOn: v.occurredOn,
-    })
-    .where(eq(expenseRecords.id, v.id))
+  await db.transaction(async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(expenseRecords)
+      .where(eq(expenseRecords.id, v.id))
+    if (!existing) return
+    await reverseExpenseRecordLiability(tx, existing)
+    const liabilityEffect = await applyExpenseRecordLiability(
+      tx,
+      existing.expenseCategoryId,
+      v.amount,
+    )
+    await tx
+      .update(expenseRecords)
+      .set({
+        appliedLiabilityId: liabilityEffect.appliedLiabilityId,
+        appliedLiabilityAmount: liabilityEffect.appliedLiabilityAmount,
+        amount: v.amount.toFixed(2),
+        currency: v.currency,
+        occurredOn: v.occurredOn,
+      })
+      .where(eq(expenseRecords.id, v.id))
+  })
   rev()
   return ok()
 }
@@ -276,7 +382,17 @@ export async function updateExpenseRecord(input: unknown): Promise<ActionResult>
 export async function deleteExpenseRecord(id: string): Promise<ActionResult> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
-  await db.delete(expenseRecords).where(eq(expenseRecords.id, id))
+  await db.transaction(async (tx) => {
+    const [existing] = await tx
+      .select({
+        appliedLiabilityId: expenseRecords.appliedLiabilityId,
+        appliedLiabilityAmount: expenseRecords.appliedLiabilityAmount,
+      })
+      .from(expenseRecords)
+      .where(eq(expenseRecords.id, id))
+    if (existing) await reverseExpenseRecordLiability(tx, existing)
+    await tx.delete(expenseRecords).where(eq(expenseRecords.id, id))
+  })
   rev()
   return ok()
 }
@@ -305,34 +421,37 @@ export async function finalizeBudgetMonth(input: unknown): Promise<ActionResult>
   const incomeRows = await db.select().from(incomeLines)
   const expenseCategoryRows = await db.select().from(expenseCategories)
   const { end } = utcMonthBoundsForCalendarMonth(parts.year, parts.monthIndex0)
-
-  await db.transaction(async (tx) => {
-    await tx.delete(budgetMonthPlanLines).where(eq(budgetMonthPlanLines.periodMonth, start))
-
-    for (const line of incomeRows) {
+  const snapshotValues = [
+    ...incomeRows.map((line) => {
       const { currency, amount } = monthlyPlannedForLine(line, start, end)
-      await tx.insert(budgetMonthPlanLines).values({
+      return {
         periodMonth: start,
-        lineKind: "income",
+        lineKind: "income" as const,
         incomeLineId: line.id,
         expenseLineId: null,
         expenseCategoryId: null,
         currency,
         plannedAmount: amount.toFixed(2),
-      })
-    }
-
-    for (const cat of expenseCategoryRows) {
+      }
+    }),
+    ...expenseCategoryRows.map((cat) => {
       const { currency, amount } = monthlyPlannedForExpenseCategory(cat)
-      await tx.insert(budgetMonthPlanLines).values({
+      return {
         periodMonth: start,
-        lineKind: "expense_category",
+        lineKind: "expense_category" as const,
         incomeLineId: null,
         expenseLineId: null,
         expenseCategoryId: cat.id,
         currency,
         plannedAmount: amount.toFixed(2),
-      })
+      }
+    }),
+  ]
+
+  await db.transaction(async (tx) => {
+    await tx.delete(budgetMonthPlanLines).where(eq(budgetMonthPlanLines.periodMonth, start))
+    if (snapshotValues.length > 0) {
+      await tx.insert(budgetMonthPlanLines).values(snapshotValues)
     }
   })
 

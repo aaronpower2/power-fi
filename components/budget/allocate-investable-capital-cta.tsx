@@ -84,7 +84,7 @@ export function AllocateInvestableCapitalCta({
     const r = await allocateInvestablePerStrategy({ yearMonth: ym, summaryCurrency, weights })
     setPending(false)
     if (r.ok && r.data) {
-      toast.success(`Created ${r.data.created} allocation record(s) in Portfolio.`)
+      toast.success(`Created ${r.data.created} allocation record(s) in Net Worth.`)
       setDialogOpen(false)
       refresh()
     } else if (!r.ok) {

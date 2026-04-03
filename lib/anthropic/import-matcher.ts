@@ -88,11 +88,12 @@ ${JSON.stringify(
   return `You are categorizing personal finance transactions for a budget app.
 
 Rules:
-- **Budget caps are at the expense category level.** For expense transactions, prefer an existing **expense category** UUID from the list below.
+- **Cash Flow caps are at the expense category level.** For expense transactions, prefer an existing **expense category** UUID from the list below.
 - **Map expenses broadly.** Merchant/description text is a hint for theme, not a requirement that the category name match the merchant. Example: "NETFLIX", "SPOTIFY", "APPLE.COM/BILL" should usually map to a broad existing category like entertainment/subscriptions, not a merchant-specific bucket.
 - **Reuse existing categories whenever plausible.** Only use propose_category_name when no existing expense category is a reasonable home for the transaction.
 - **Income remains line-based.** For income transactions, set existing_line_id to a UUID from the income line list below.
 - kind is "expense" for spending, fees, card purchases, and card refunds/credits (map refunds to the same thematic expense category — do NOT use income unless it is clearly salary, interest earned, or a labeled income deposit).
+- If a transaction is clearly a fixed loan installment or debt-service payment, prefer an existing category whose cash_flow_type is debt_payment.
 - kind is "income" only for salary, freelance payment, interest, dividends, or clear deposits that are income.
 - For expense transactions, set existing_category_id to a UUID exactly from the expense category list below when possible.
 - For income transactions, set existing_line_id to a UUID exactly from the income line list below.

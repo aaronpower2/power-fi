@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState, useTransition } from "react"
 import { toast } from "sonner"
 
 import {
+  acceptBulkSuggestedFromImport,
   acceptImportMatch,
   acceptNewCategoryAndPost,
   acceptSuggestedCategoryFromImport,
@@ -17,7 +18,7 @@ import {
   runAnthropicMatch,
 } from "@/lib/actions/import-transactions"
 import type { getBudgetPageData } from "@/lib/data/budget"
-import type { ImportBatchDetail } from "@/lib/data/import-transactions"
+import type { ImportBatchDetail, ImportBatchFilterKey } from "@/lib/data/import-transactions"
 import { formatCurrency } from "@/lib/format"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -56,7 +57,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { FileSearch, Loader2, Trash2, Upload } from "lucide-react"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
+import { Check, FileSearch, FolderInput, Loader2, Trash2, Upload } from "lucide-react"
 
 type BudgetData = Awaited<ReturnType<typeof getBudgetPageData>>
 
@@ -67,10 +74,11 @@ type BatchRow = {
   createdAt: Date
 }
 
-type FilterKey = "all" | "pending" | "suggested_line" | "needs_new_line" | "posted" | "rejected"
+type FilterKey = ImportBatchFilterKey
+const PAGE_SIZE = 100
 
 /** Long server actions (upload/parse/match) — keep separate so "Run AI match" does not show the Upload spinner. */
-type BatchActionBusy = "idle" | "upload" | "parse" | "match" | "delete"
+type BatchActionBusy = "idle" | "upload" | "parse" | "match" | "delete" | "bulk_post"
 
 export function ImportTransactionsPanel({
   data,
@@ -85,6 +93,7 @@ export function ImportTransactionsPanel({
   const [batchId, setBatchId] = useState<string | null>(null)
   const [detail, setDetail] = useState<ImportBatchDetail | null>(null)
   const [filter, setFilter] = useState<FilterKey>("all")
+  const [pageOffset, setPageOffset] = useState(0)
   const [uploadLabel, setUploadLabel] = useState("")
   const [deleteId, setDeleteId] = useState<string | null>(null)
   const [matchOverrides, setMatchOverrides] = useState<Record<string, string>>({})
@@ -102,9 +111,14 @@ export function ImportTransactionsPanel({
     })
   }, [])
 
-  const loadDetail = useCallback((id: string) => {
+  const loadDetail = useCallback((id: string, nextFilter: FilterKey, nextOffset: number) => {
     startListTransition(async () => {
-      const r = await getImportBatchDetailAction(id)
+      const r = await getImportBatchDetailAction({
+        batchId: id,
+        filter: nextFilter,
+        limit: PAGE_SIZE,
+        offset: nextOffset,
+      })
       if (r.ok && r.data) {
         setDetail(r.data as ImportBatchDetail)
       } else {
@@ -119,14 +133,20 @@ export function ImportTransactionsPanel({
   }, [loadBatches])
 
   useEffect(() => {
-    if (batchId) loadDetail(batchId)
-  }, [batchId, loadDetail])
+    if (batchId) loadDetail(batchId, filter, pageOffset)
+  }, [batchId, filter, loadDetail, pageOffset])
 
-  const filteredTx = useMemo(() => {
-    if (!detail?.transactions) return []
-    if (filter === "all") return detail.transactions
-    return detail.transactions.filter((t) => t.matchStatus === filter)
-  }, [detail, filter])
+  const filteredTx = useMemo(() => detail?.transactions ?? [], [detail])
+
+  const bulkMatchedCount = useMemo(
+    () => detail?.statusCounts.suggested_line ?? 0,
+    [detail],
+  )
+
+  const bulkAllSuggestedCount = useMemo(
+    () => (detail?.statusCounts.suggested_line ?? 0) + (detail?.statusCounts.needs_new_line ?? 0),
+    [detail],
+  )
 
   async function onUpload(formData: FormData) {
     if (uploadLabel.trim()) formData.set("label", uploadLabel.trim())
@@ -136,9 +156,9 @@ export function ImportTransactionsPanel({
       if (r.ok && r.data) {
         toast.success("Upload saved")
         setBatchId(r.data.batchId)
+        setPageOffset(0)
         loadBatches()
-        loadDetail(r.data.batchId)
-        refreshBudget()
+        loadDetail(r.data.batchId, filter, 0)
       } else toast.error(r.ok === false ? r.error : "Upload failed")
     } finally {
       setBatchActionBusy("idle")
@@ -152,9 +172,8 @@ export function ImportTransactionsPanel({
       const r = await parseImportBatch(batchId)
       if (r.ok) {
         toast.success("Parse finished")
-        loadDetail(batchId)
+        loadDetail(batchId, filter, pageOffset)
         loadBatches()
-        refreshBudget()
       } else toast.error(r.error)
     } finally {
       setBatchActionBusy("idle")
@@ -177,9 +196,36 @@ export function ImportTransactionsPanel({
       const r = await runAnthropicMatch(batchId)
       if (r.ok) {
         toast.success("AI matching finished")
-        loadDetail(batchId)
+        loadDetail(batchId, filter, pageOffset)
         loadBatches()
       } else toast.error(r.error)
+    } finally {
+      setBatchActionBusy("idle")
+    }
+  }
+
+  async function onBulkPost(scope: "matched" | "all") {
+    if (!batchId) return
+    setBatchActionBusy("bulk_post")
+    try {
+      const r = await acceptBulkSuggestedFromImport({ batchId, scope })
+      if (r.ok && r.data) {
+        const { posted, failed, errors } = r.data
+        if (batchId) loadDetail(batchId, filter, pageOffset)
+        refreshBudget()
+        if (posted === 0 && failed === 0) {
+          toast.message("No rows to post for that option.")
+        } else if (failed === 0) {
+          toast.success(`Posted ${posted} transaction${posted === 1 ? "" : "s"}.`)
+        } else if (posted === 0) {
+          toast.error(
+            errors.length > 0 ? errors.slice(0, 2).join(" · ") : `Could not post ${failed} row(s).`,
+          )
+        } else {
+          const hint = errors.length > 0 ? ` ${errors[0]}` : ""
+          toast.success(`Posted ${posted}; ${failed} failed.${hint}`)
+        }
+      } else toast.error(r.ok === false ? r.error : "Bulk post failed")
     } finally {
       setBatchActionBusy("idle")
     }
@@ -196,7 +242,6 @@ export function ImportTransactionsPanel({
         toast.success("Batch deleted")
         if (batchId === id) setBatchId(null)
         loadBatches()
-        refreshBudget()
       } else toast.error(r.error)
     } finally {
       setBatchActionBusy("idle")
@@ -243,7 +288,7 @@ export function ImportTransactionsPanel({
           : await acceptImportMatch({ importedTransactionId: importedId, incomeLineId: targetId })
       if (r.ok) {
         toast.success("Posted")
-        if (batchId) loadDetail(batchId)
+        if (batchId) loadDetail(batchId, filter, pageOffset)
         refreshBudget()
       } else toast.error(r.error)
     })
@@ -253,7 +298,8 @@ export function ImportTransactionsPanel({
   const tableActionsLocked =
     batchActionBusy === "match" ||
     batchActionBusy === "parse" ||
-    batchActionBusy === "delete"
+    batchActionBusy === "delete" ||
+    batchActionBusy === "bulk_post"
 
   function openManualCategoryDialog(importedId: string) {
     setManualCategoryTxId(importedId)
@@ -279,7 +325,7 @@ export function ImportTransactionsPanel({
       if (r.ok) {
         toast.success("Expense category posted")
         setManualCategoryTxId(null)
-        if (batchId) loadDetail(batchId)
+        if (batchId) loadDetail(batchId, filter, pageOffset)
         refreshBudget()
       } else toast.error(r.error)
     } finally {
@@ -356,7 +402,9 @@ export function ImportTransactionsPanel({
                 if (v === "_") {
                   setBatchId(null)
                   setDetail(null)
+                  setPageOffset(0)
                 } else {
+                  setPageOffset(0)
                   setBatchId(v)
                 }
               }}
@@ -416,57 +464,128 @@ export function ImportTransactionsPanel({
           </div>
 
           {detail && (
-            <div className="space-y-3">
-              <p className="text-muted-foreground text-sm">
-                Batch status: <span className="text-foreground font-medium">{detail.batch.status}</span>
-              </p>
-              <ul className="text-muted-foreground space-y-1 text-sm">
-                {detail.files.map((f) => (
-                  <li key={f.id}>
-                    <span className="text-foreground">{f.originalName}</span> — {f.parserKind} —{" "}
-                    {f.parseStatus}
-                    {f.parseError ? (
-                      <span className="text-destructive"> — {f.parseError}</span>
+            <TooltipProvider delayDuration={400}>
+              <div className="space-y-3">
+                <p className="text-muted-foreground text-sm">
+                  Batch status: <span className="text-foreground font-medium">{detail.batch.status}</span>
+                </p>
+                <ul className="text-muted-foreground space-y-1 text-sm">
+                  {detail.files.map((f) => (
+                    <li key={f.id}>
+                      <span className="text-foreground">{f.originalName}</span> — {f.parserKind} —{" "}
+                      {f.parseStatus}
+                      {f.parseError ? (
+                        <span className="text-destructive"> — {f.parseError}</span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-medium">Filter</span>
+                  {(
+                    [
+                      ["all", "All"],
+                      ["pending", "Pending"],
+                      ["suggested_line", "Suggested match"],
+                      ["needs_new_line", "Review"],
+                      ["posted", "Posted"],
+                      ["rejected", "Dismissed"],
+                    ] as const
+                  ).map(([k, lab]) => (
+                    <Button
+                      key={k}
+                      type="button"
+                      variant={filter === k ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => {
+                        setFilter(k)
+                        setPageOffset(0)
+                      }}
+                    >
+                      {lab}
+                      {detail ? ` (${detail.statusCounts[k]})` : ""}
+                    </Button>
+                  ))}
+                </div>
+
+                {detail.page.total > detail.page.limit ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                    <span className="text-muted-foreground">
+                      Showing {detail.page.offset + 1}-{detail.page.offset + filteredTx.length} of{" "}
+                      {detail.page.total}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={batchControlsLocked || detail.page.offset === 0}
+                        onClick={() => setPageOffset(Math.max(0, detail.page.offset - detail.page.limit))}
+                      >
+                        Previous
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={batchControlsLocked || !detail.page.hasMore}
+                        onClick={() => setPageOffset(detail.page.offset + detail.page.limit)}
+                      >
+                        Next
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="bg-muted/40 flex flex-col gap-2 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-center gap-2 text-sm font-medium">
+                    Post from suggestions
+                    {batchActionBusy === "bulk_post" ? (
+                      <Loader2 className="text-muted-foreground size-3.5 animate-spin" aria-hidden />
                     ) : null}
-                  </li>
-                ))}
-              </ul>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="default"
+                      disabled={batchControlsLocked || bulkMatchedCount === 0}
+                      title="Existing category or income line only"
+                      onClick={() => void onBulkPost("matched")}
+                    >
+                      Matched{bulkMatchedCount > 0 ? ` (${bulkMatchedCount})` : ""}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={batchControlsLocked || bulkAllSuggestedCount === 0}
+                      title="Matched rows plus review rows with a suggested category name"
+                      onClick={() => void onBulkPost("all")}
+                    >
+                      All{bulkAllSuggestedCount > 0 ? ` (${bulkAllSuggestedCount})` : ""}
+                    </Button>
+                  </div>
+                </div>
+                <p className="text-muted-foreground text-xs">
+                  <span className="font-medium text-foreground">Matched</span> posts rows mapped to an
+                  existing category or income line.{" "}
+                  <span className="font-medium text-foreground">All</span> also creates categories from AI
+                  review suggestions when needed.
+                </p>
 
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm font-medium">Filter</span>
-                {(
-                  [
-                    ["all", "All"],
-                    ["pending", "Pending"],
-                    ["suggested_line", "Suggested match"],
-                    ["needs_new_line", "Review"],
-                    ["posted", "Posted"],
-                    ["rejected", "Dismissed"],
-                  ] as const
-                ).map(([k, lab]) => (
-                  <Button
-                    key={k}
-                    type="button"
-                    variant={filter === k ? "default" : "outline"}
-                    size="sm"
-                    onClick={() => setFilter(k)}
-                  >
-                    {lab}
-                  </Button>
-                ))}
-              </div>
-
-              <div className="rounded-md border">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Date</TableHead>
-                      <TableHead>Description</TableHead>
-                      <TableHead className="text-right">Amount</TableHead>
-                      <TableHead>Match</TableHead>
-                      <TableHead className="min-w-[220px]">Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
+                <div className="rounded-md border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Date</TableHead>
+                        <TableHead>Description</TableHead>
+                        <TableHead className="text-right">Amount</TableHead>
+                        <TableHead>Match</TableHead>
+                        <TableHead className="w-[1%] whitespace-nowrap">Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
                   <TableBody>
                     {filteredTx.length === 0 ? (
                       <TableRow>
@@ -478,7 +597,7 @@ export function ImportTransactionsPanel({
                       filteredTx.map((t) => (
                         <TableRow key={t.id}>
                           <TableCell className="whitespace-nowrap">{t.occurredOn}</TableCell>
-                          <TableCell className="max-w-[240px] truncate" title={t.description}>
+                          <TableCell className="max-w-60 truncate" title={t.description}>
                             {t.description}
                           </TableCell>
                           <TableCell className="text-right tabular-nums">
@@ -510,60 +629,104 @@ export function ImportTransactionsPanel({
                               </span>
                             ) : null}
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="align-top">
                             {t.postedRecordId ? null : (
-                              <div className="flex flex-col gap-2">
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="outline"
-                                  className="w-full sm:w-auto"
-                                  disabled={tableActionsLocked}
-                                  onClick={() => openManualCategoryDialog(t.id)}
-                                >
-                                  Post to category…
-                                </Button>
-                                {t.matchStatus === "suggested_line" && (
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    className="w-full sm:w-auto"
-                                    disabled={tableActionsLocked}
-                                    onClick={() =>
-                                      startListTransition(async () => {
-                                        const r = await acceptSuggestedMatchFromImport(t.id)
-                                        if (r.ok) {
-                                          toast.success("Posted")
-                                          if (batchId) loadDetail(batchId)
-                                          refreshBudget()
-                                        } else toast.error(r.error)
-                                      })
-                                    }
-                                  >
-                                    Accept match
-                                  </Button>
-                                )}
-                                {t.matchStatus === "needs_new_line" && (
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="secondary"
-                                    className="w-full sm:w-auto"
-                                    disabled={tableActionsLocked}
-                                    onClick={() =>
-                                      startListTransition(async () => {
-                                        const r = await acceptSuggestedCategoryFromImport(t.id)
-                                        if (r.ok) {
-                                          toast.success("Category posted")
-                                          if (batchId) loadDetail(batchId)
-                                          refreshBudget()
-                                        } else toast.error(r.error)
-                                      })
-                                    }
-                                  >
-                                    Post suggested category
-                                  </Button>
-                                )}
+                              <div className="flex max-w-[min(100vw-4rem,20rem)] flex-col gap-2 py-0.5">
+                                <div className="flex flex-wrap items-center gap-1">
+                                  {t.matchStatus === "suggested_line" ? (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Button
+                                          type="button"
+                                          size="icon"
+                                          variant="default"
+                                          className="size-8 shrink-0"
+                                          disabled={tableActionsLocked}
+                                          aria-label="Accept suggested match"
+                                          onClick={() =>
+                                            startListTransition(async () => {
+                                              const r = await acceptSuggestedMatchFromImport(t.id)
+                                              if (r.ok) {
+                                                toast.success("Posted")
+                                                if (batchId) loadDetail(batchId, filter, pageOffset)
+                                                refreshBudget()
+                                              } else toast.error(r.error)
+                                            })
+                                          }
+                                        >
+                                          <Check className="size-4" aria-hidden />
+                                        </Button>
+                                      </TooltipTrigger>
+                                      <TooltipContent side="top">Accept suggested match</TooltipContent>
+                                    </Tooltip>
+                                  ) : null}
+                                  {t.matchStatus === "needs_new_line" ? (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Button
+                                          type="button"
+                                          size="sm"
+                                          variant="secondary"
+                                          className="h-8 shrink-0 px-2 text-xs"
+                                          disabled={tableActionsLocked}
+                                          onClick={() =>
+                                            startListTransition(async () => {
+                                              const r = await acceptSuggestedCategoryFromImport(t.id)
+                                              if (r.ok) {
+                                                toast.success("Posted")
+                                                if (batchId) loadDetail(batchId, filter, pageOffset)
+                                                refreshBudget()
+                                              } else toast.error(r.error)
+                                            })
+                                          }
+                                        >
+                                          Post category
+                                        </Button>
+                                      </TooltipTrigger>
+                                      <TooltipContent side="top">Post using suggested category</TooltipContent>
+                                    </Tooltip>
+                                  ) : null}
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        type="button"
+                                        size="icon"
+                                        variant="outline"
+                                        className="size-8 shrink-0"
+                                        disabled={tableActionsLocked}
+                                        aria-label="Choose expense category"
+                                        onClick={() => openManualCategoryDialog(t.id)}
+                                      >
+                                        <FolderInput className="size-4" aria-hidden />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent side="top">Pick expense category…</TooltipContent>
+                                  </Tooltip>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        type="button"
+                                        size="icon"
+                                        variant="ghost"
+                                        className="text-muted-foreground size-8 shrink-0"
+                                        disabled={tableActionsLocked}
+                                        aria-label="Dismiss import row"
+                                        onClick={() =>
+                                          startListTransition(async () => {
+                                            const r = await dismissImportedTransaction(t.id)
+                                            if (r.ok) {
+                                              toast.message("Dismissed")
+                                              if (batchId) loadDetail(batchId, filter, pageOffset)
+                                            } else toast.error(r.error)
+                                          })
+                                        }
+                                      >
+                                        <Trash2 className="size-4" aria-hidden />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent side="top">Dismiss</TooltipContent>
+                                  </Tooltip>
+                                </div>
                                 <div className="flex flex-wrap items-center gap-1">
                                   <Select
                                     value={matchOverrides[t.id] ?? "_"}
@@ -571,11 +734,11 @@ export function ImportTransactionsPanel({
                                       setMatchOverrides((o) => ({ ...o, [t.id]: v }))
                                     }
                                   >
-                                    <SelectTrigger className="h-8 w-[180px]">
-                                      <SelectValue placeholder="Pick match…" />
+                                    <SelectTrigger className="h-8 min-w-0 flex-1 sm:max-w-44">
+                                      <SelectValue placeholder="Override…" />
                                     </SelectTrigger>
                                     <SelectContent>
-                                      <SelectItem value="_">Pick match…</SelectItem>
+                                      <SelectItem value="_">Override…</SelectItem>
                                       {expenseOptions.map((o) => (
                                         <SelectItem key={o.value} value={o.value}>
                                           {o.label}
@@ -592,28 +755,11 @@ export function ImportTransactionsPanel({
                                     type="button"
                                     size="sm"
                                     variant="outline"
+                                    className="h-8 shrink-0 px-2"
                                     disabled={tableActionsLocked}
                                     onClick={() => postOverride(t.id)}
                                   >
                                     Post
-                                  </Button>
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="ghost"
-                                    className="text-muted-foreground"
-                                    disabled={tableActionsLocked}
-                                    onClick={() =>
-                                      startListTransition(async () => {
-                                        const r = await dismissImportedTransaction(t.id)
-                                        if (r.ok) {
-                                          toast.message("Dismissed")
-                                          if (batchId) loadDetail(batchId)
-                                        } else toast.error(r.error)
-                                      })
-                                    }
-                                  >
-                                    Dismiss
                                   </Button>
                                 </div>
                               </div>
@@ -623,9 +769,10 @@ export function ImportTransactionsPanel({
                       ))
                     )}
                   </TableBody>
-                </Table>
+                  </Table>
+                </div>
               </div>
-            </div>
+            </TooltipProvider>
           )}
         </CardContent>
       </Card>

@@ -6,6 +6,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  useSyncExternalStore,
   useTransition,
   type Dispatch,
   type SetStateAction,
@@ -20,7 +21,6 @@ import {
   createIncomeLine,
   createIncomeRecord,
   deleteExpenseCategory,
-  deleteExpenseLine,
   deleteExpenseRecord,
   deleteIncomeLine,
   deleteIncomeRecord,
@@ -40,6 +40,7 @@ import {
 import type { getBudgetPageData } from "@/lib/data/budget"
 import { formatCurrency } from "@/lib/format"
 import {
+  CASH_FLOW_TYPES,
   expenseCategorySchema,
   expenseLineSchema,
   expenseRecordSchema,
@@ -121,7 +122,6 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Cell,
   ResponsiveContainer,
   Tooltip as RechartsTooltip,
   XAxis,
@@ -131,6 +131,21 @@ import { z } from "zod"
 
 type BudgetData = Awaited<ReturnType<typeof getBudgetPageData>>
 type SupportedCurrency = (typeof SUPPORTED_CURRENCIES)[number]
+type CashFlowType = (typeof CASH_FLOW_TYPES)[number]
+
+function subscribeToHydration(cb: () => void) {
+  if (typeof window === "undefined") return () => {}
+  queueMicrotask(cb)
+  return () => {}
+}
+
+function useClientMounted(): boolean {
+  return useSyncExternalStore(
+    subscribeToHydration,
+    () => true,
+    () => false,
+  )
+}
 
 function formatSummaryCcyValue(ccy: string, value: number) {
   const code = ccy.toUpperCase()
@@ -220,7 +235,7 @@ type IncomeLineDialogState =
   | null
 
 type ExpenseCatDialogState =
-  | "create"
+  | { createType: CashFlowType }
   | { edit: BudgetData["expenseCategories"][number] }
   | null
 
@@ -451,6 +466,8 @@ function ExpensePieTooltip({
 
 type ExpenseCategoryDraft = {
   name: string
+  cashFlowType: CashFlowType
+  linkedLiabilityId: string
   isRecurring: boolean
   frequency: BudgetRecurringFrequency
   recurringAmount: string
@@ -465,6 +482,8 @@ function normalizeWholeCurrencyAmountInput(value: string | number | null | undef
 function expenseCategoryToDraft(c: BudgetData["expenseCategories"][number]): ExpenseCategoryDraft {
   return {
     name: c.name,
+    cashFlowType: (c.cashFlowType ?? "expense") as CashFlowType,
+    linkedLiabilityId: c.linkedLiabilityId ?? "",
     isRecurring: c.isRecurring,
     frequency: parseBudgetFrequency(c.frequency) ?? "monthly",
     recurringAmount: normalizeWholeCurrencyAmountInput(c.recurringAmount),
@@ -479,6 +498,8 @@ function expenseCategoryDraftMatchesServer(
   const s = expenseCategoryToDraft(c)
   return (
     draft.name === s.name &&
+    draft.cashFlowType === s.cashFlowType &&
+    draft.linkedLiabilityId === s.linkedLiabilityId &&
     draft.isRecurring === s.isRecurring &&
     draft.frequency === s.frequency &&
     draft.recurringAmount === s.recurringAmount &&
@@ -497,6 +518,8 @@ function buildExpenseCategoryUpdatePayload(
     id: c.id,
     name: draft.name.trim(),
     sortOrder: c.sortOrder,
+    cashFlowType: draft.cashFlowType,
+    linkedLiabilityId: draft.cashFlowType === "debt_payment" ? draft.linkedLiabilityId : "",
     isRecurring: draft.isRecurring,
     frequency: draft.isRecurring ? draft.frequency : null,
     recurringAmount: parsedAmount,
@@ -638,29 +661,13 @@ function ExpenseCategoriesManageDialog({
   onRequestDelete: (id: string) => void
   refresh: () => void
 }) {
-  const [drafts, setDrafts] = useState<Record<string, ExpenseCategoryDraft>>({})
-  const [isSavingAll, startSavingAll] = useTransition()
-
-  const categoriesKey = useMemo(
-    () =>
-      categories
-        .map((c) =>
-          [c.id, c.name, c.sortOrder, c.isRecurring, c.frequency ?? "", c.recurringAmount ?? "", c.recurringCurrency ?? ""].join(
-            "\0",
-          ),
-        )
-        .join("\n"),
-    [categories],
+  const [drafts, setDrafts] = useState<Record<string, ExpenseCategoryDraft>>(() =>
+    Object.fromEntries(categories.map((c) => [c.id, expenseCategoryToDraft(c)])) as Record<
+      string,
+      ExpenseCategoryDraft
+    >,
   )
-
-  useEffect(() => {
-    setDrafts(
-      Object.fromEntries(categories.map((c) => [c.id, expenseCategoryToDraft(c)])) as Record<
-        string,
-        ExpenseCategoryDraft
-      >,
-    )
-  }, [categoriesKey, categories, open])
+  const [isSavingAll, startSavingAll] = useTransition()
 
   const dirtyCategories = useMemo(
     () =>
@@ -785,17 +792,21 @@ function ExpenseCategoriesManageDialog({
 export function BudgetManager({ data }: { data: BudgetData }) {
   const router = useRouter()
   const refresh = () => router.refresh()
+  const expenseCategories = useMemo(
+    () => data.expenseCategories.filter((category) => category.cashFlowType !== "debt_payment"),
+    [data.expenseCategories],
+  )
+  const debtPaymentCategories = useMemo(
+    () => data.expenseCategories.filter((category) => category.cashFlowType === "debt_payment"),
+    [data.expenseCategories],
+  )
 
   const [activeTab, setActiveTab] = useState("income")
-  const [mounted, setMounted] = useState(false)
+  const mounted = useClientMounted()
   const [incomeLineDialog, setIncomeLineDialog] = useState<IncomeLineDialogState>(null)
   const [expenseCatDialog, setExpenseCatDialog] = useState<ExpenseCatDialogState>(null)
   const [expenseLineDialog, setExpenseLineDialog] = useState<ExpenseLineDialogState>(null)
   const [expenseCategoriesManageOpen, setExpenseCategoriesManageOpen] = useState(false)
-
-  useEffect(() => {
-    setMounted(true)
-  }, [])
 
   return (
     <div id="budget-detail" className="space-y-6 scroll-mt-4">
@@ -810,7 +821,7 @@ export function BudgetManager({ data }: { data: BudgetData }) {
           {data.fxWarning}
         </p>
       ) : null}
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
         <Card size="sm" className="border-primary/20 bg-primary/5">
           <CardHeader className="gap-0 pb-1 pt-3">
             <CardHeaderTitleRow
@@ -843,7 +854,7 @@ export function BudgetManager({ data }: { data: BudgetData }) {
           <CardHeader className="gap-0 pb-1 pt-3">
             <CardHeaderTitleRow
               title={<CardTitle className="text-sm leading-tight">Expenses</CardTitle>}
-              info="Planned from recurring rules on each expense category (or a finalized snapshot); actual from expense line records in this UTC month. Amounts use the summary currency you select."
+              info="Planned from recurring rules on each spending category (or a finalized snapshot); actual from posted spending records in this UTC month. Amounts use the summary currency you select."
             />
           </CardHeader>
           <CardContent className="pb-3 pt-0">
@@ -851,6 +862,21 @@ export function BudgetManager({ data }: { data: BudgetData }) {
               ccy={data.summaryCurrency}
               planned={data.totals.expensePlanned}
               actual={data.totals.expenseActual}
+            />
+          </CardContent>
+        </Card>
+        <Card size="sm">
+          <CardHeader className="gap-0 pb-1 pt-3">
+            <CardHeaderTitleRow
+              title={<CardTitle className="text-sm leading-tight">Debt payments</CardTitle>}
+              info="Planned from recurring debt-payment categories; actual from posted debt-service records. These cash outflows reduce investable capital and can reduce linked fixed-installment liabilities."
+            />
+          </CardHeader>
+          <CardContent className="pb-3 pt-0">
+            <PlannedActualSummaryPair
+              ccy={data.summaryCurrency}
+              planned={data.totals.debtPaymentPlanned}
+              actual={data.totals.debtPaymentActual}
             />
           </CardContent>
         </Card>
@@ -863,6 +889,7 @@ export function BudgetManager({ data }: { data: BudgetData }) {
               Income
             </span>
             <span className="px-3 py-1">Expenses</span>
+            <span className="px-3 py-1">Debt payments</span>
           </div>
           <div className="rounded-lg border p-6 text-sm text-muted-foreground">
             Loading budget tools…
@@ -873,6 +900,7 @@ export function BudgetManager({ data }: { data: BudgetData }) {
           <TabsList>
             <TabsTrigger value="income">Income</TabsTrigger>
             <TabsTrigger value="expenses">Expenses</TabsTrigger>
+            <TabsTrigger value="debt-payments">Debt payments</TabsTrigger>
           </TabsList>
           <TabsContent value="income" className="mt-4">
             <IncomeTab
@@ -885,6 +913,22 @@ export function BudgetManager({ data }: { data: BudgetData }) {
           <TabsContent value="expenses" className="mt-4">
             <ExpensesTab
               data={data}
+              cashFlowType="expense"
+              categories={expenseCategories}
+              refresh={refresh}
+              catDialog={expenseCatDialog}
+              setCatDialog={setExpenseCatDialog}
+              lineDialog={expenseLineDialog}
+              setLineDialog={setExpenseLineDialog}
+              categoriesManageOpen={expenseCategoriesManageOpen}
+              setCategoriesManageOpen={setExpenseCategoriesManageOpen}
+            />
+          </TabsContent>
+          <TabsContent value="debt-payments" className="mt-4">
+            <ExpensesTab
+              data={data}
+              cashFlowType="debt_payment"
+              categories={debtPaymentCategories}
               refresh={refresh}
               catDialog={expenseCatDialog}
               setCatDialog={setExpenseCatDialog}
@@ -1534,6 +1578,8 @@ function IncomeRecordsDialog({
 
 function ExpensesTab({
   data,
+  cashFlowType,
+  categories,
   refresh,
   catDialog,
   setCatDialog,
@@ -1543,6 +1589,8 @@ function ExpensesTab({
   setCategoriesManageOpen,
 }: {
   data: BudgetData
+  cashFlowType: CashFlowType
+  categories: BudgetData["expenseCategories"]
   refresh: () => void
   catDialog: ExpenseCatDialogState
   setCatDialog: Dispatch<SetStateAction<ExpenseCatDialogState>>
@@ -1566,18 +1614,31 @@ function ExpensesTab({
     lineName?: string | null
   } | null>(null)
 
+  const isDebtPayments = cashFlowType === "debt_payment"
+
   return (
     <div className="space-y-6">
-      <ExpenseCategoryPieCard
-        data={data}
-        onManageCategories={() => setCategoriesManageOpen(true)}
-      />
+      {!isDebtPayments ? (
+        <ExpenseCategoryPieCard
+          data={{
+            ...data,
+            expenseCategories: categories,
+          }}
+          onManageCategories={() => setCategoriesManageOpen(true)}
+        />
+      ) : null}
 
       <ExpenseCategoriesManageDialog
+        key={`${cashFlowType}-${categories
+          .map(
+            (c) =>
+              `${c.id}:${c.name}:${c.sortOrder}:${c.cashFlowType ?? "expense"}:${c.linkedLiabilityId ?? ""}:${c.isRecurring}:${c.frequency ?? ""}:${c.recurringAmount ?? ""}:${c.recurringCurrency ?? ""}`,
+          )
+          .join("|")}`}
         open={categoriesManageOpen}
         onOpenChange={setCategoriesManageOpen}
-        categories={data.expenseCategories}
-        onAdd={() => setCatDialog("create")}
+        categories={categories}
+        onAdd={() => setCatDialog({ createType: cashFlowType })}
         onRequestDelete={(id) => {
           setCategoriesManageOpen(false)
           setDelCat(id)
@@ -1588,20 +1649,31 @@ function ExpensesTab({
       <Card>
         <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <CardHeaderTitleRow
-            title={<CardTitle>Expenses by category</CardTitle>}
-            info="Compact category table with rolled-up actuals in the selected summary currency. Toggle a row to reveal posted transactions for this month."
+            title={<CardTitle>{isDebtPayments ? "Debt payments by category" : "Expenses by category"}</CardTitle>}
+            info={
+              isDebtPayments
+                ? "Linked debt-payment categories with rolled-up actuals in the selected summary currency. Toggle a row to reveal posted transactions for this month."
+                : "Compact category table with rolled-up actuals in the selected summary currency. Toggle a row to reveal posted transactions for this month."
+            }
           />
           <div className="flex shrink-0 flex-wrap gap-2">
+            {!isDebtPayments ? (
+              <Button
+                size="sm"
+                variant="outline"
+                className="shrink-0"
+                onClick={() => setImportTxOpen(true)}
+              >
+                <FileSearch className="size-4" />
+                Import &amp; match
+              </Button>
+            ) : null}
             <Button
               size="sm"
-              variant="outline"
+              variant="default"
               className="shrink-0"
-              onClick={() => setImportTxOpen(true)}
+              onClick={() => setCatDialog({ createType: cashFlowType })}
             >
-              <FileSearch className="size-4" />
-              Import &amp; match
-            </Button>
-            <Button size="sm" variant="default" className="shrink-0" onClick={() => setCatDialog("create")}>
               Add category
             </Button>
           </div>
@@ -1617,14 +1689,14 @@ function ExpensesTab({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.expenseCategories.length === 0 ? (
+              {categories.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={4} className="text-muted-foreground h-16 text-center">
                     No categories yet.
                   </TableCell>
                 </TableRow>
               ) : (
-                data.expenseCategories.flatMap((cat) => {
+                categories.flatMap((cat) => {
                   const txs = data.expenseTransactionsByCategoryId[cat.id] ?? []
                   const isOpen = expandedCats[cat.id] ?? false
                   const total = data.expenseActualByCategoryId[cat.id] ?? 0
@@ -1814,7 +1886,7 @@ function ExpensesTab({
           <DialogHeader className="border-b px-4 py-3 pr-14 shrink-0 space-y-0 text-left">
             <DialogTitle>Import &amp; match transactions</DialogTitle>
             <p className="text-muted-foreground text-sm font-normal">
-              Budget month {data.ym} (UTC). Posted expense categories update actuals on this tab.
+              Cash flow month {data.ym} (UTC). Posted expense categories update actuals on this tab.
             </p>
           </DialogHeader>
           <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-6 pt-4">
@@ -1826,7 +1898,11 @@ function ExpensesTab({
       <ExpenseCategoryFormDialog
         open={catDialog !== null}
         onOpenChange={(o) => !o && setCatDialog(null)}
-        category={catDialog && catDialog !== "create" ? catDialog.edit : undefined}
+        category={catDialog && "edit" in catDialog ? catDialog.edit : undefined}
+        defaultCashFlowType={
+          catDialog && "createType" in catDialog ? catDialog.createType : "expense"
+        }
+        liabilityOptions={data.liabilityOptions}
         onSaved={() => {
           setCatDialog(null)
           refresh()
@@ -1900,6 +1976,8 @@ function ExpensesTab({
 type ExpenseCategoryFormValues = {
   name: string
   sortOrder: number
+  cashFlowType: CashFlowType
+  linkedLiabilityId: string
   isRecurring: boolean
   frequency: BudgetRecurringFrequency
   recurringAmount: string
@@ -1910,11 +1988,15 @@ function ExpenseCategoryFormDialog({
   open,
   onOpenChange,
   category,
+  defaultCashFlowType,
+  liabilityOptions,
   onSaved,
 }: {
   open: boolean
   onOpenChange: (o: boolean) => void
   category?: BudgetData["expenseCategories"][number]
+  defaultCashFlowType: CashFlowType
+  liabilityOptions: BudgetData["liabilityOptions"]
   onSaved: () => void
 }) {
   const isEdit = !!category
@@ -1922,6 +2004,8 @@ function ExpenseCategoryFormDialog({
     defaultValues: {
       name: "",
       sortOrder: 0,
+      cashFlowType: defaultCashFlowType,
+      linkedLiabilityId: "",
       isRecurring: false,
       frequency: "monthly",
       recurringAmount: "",
@@ -1929,6 +2013,7 @@ function ExpenseCategoryFormDialog({
     },
   })
   const catIsRecurring = useWatch({ control: form.control, name: "isRecurring" })
+  const cashFlowType = useWatch({ control: form.control, name: "cashFlowType" })
 
   useEffect(() => {
     if (open) {
@@ -1936,6 +2021,8 @@ function ExpenseCategoryFormDialog({
       form.reset({
         name: category?.name ?? "",
         sortOrder: category?.sortOrder ?? 0,
+        cashFlowType: (category?.cashFlowType ?? defaultCashFlowType) as CashFlowType,
+        linkedLiabilityId: category?.linkedLiabilityId ?? "",
         isRecurring: category?.isRecurring ?? false,
         frequency: freq,
         recurringAmount:
@@ -1945,7 +2032,7 @@ function ExpenseCategoryFormDialog({
         recurringCurrency: category?.recurringCurrency ?? "AED",
       })
     }
-  }, [open, category, form])
+  }, [open, category, defaultCashFlowType, form])
 
   async function onSubmit(values: ExpenseCategoryFormValues) {
     const parsedAmount =
@@ -1955,6 +2042,8 @@ function ExpenseCategoryFormDialog({
     const body = {
       name: values.name,
       sortOrder: values.sortOrder,
+      cashFlowType: values.cashFlowType,
+      linkedLiabilityId: values.cashFlowType === "debt_payment" ? values.linkedLiabilityId : "",
       isRecurring: values.isRecurring,
       frequency: values.isRecurring ? values.frequency : null,
       recurringAmount: parsedAmount,
@@ -2026,6 +2115,55 @@ function ExpenseCategoryFormDialog({
                 </FormItem>
               )}
             />
+            <FormField
+              control={form.control}
+              name="cashFlowType"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Category type</FormLabel>
+                  <Select value={field.value} onValueChange={field.onChange}>
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      <SelectItem value="expense">Expense</SelectItem>
+                      <SelectItem value="debt_payment">Debt payment</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            {cashFlowType === "debt_payment" ? (
+              <FormField
+                control={form.control}
+                name="linkedLiabilityId"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Linked liability</FormLabel>
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Choose liability" />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        {liabilityOptions
+                          .filter((row) => row.trackingMode === "fixed_installment")
+                          .map((row) => (
+                            <SelectItem key={row.id} value={row.id}>
+                              {row.name} ({row.currency})
+                            </SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            ) : null}
             <FormField
               control={form.control}
               name="isRecurring"

@@ -39,7 +39,7 @@ export function SummaryDashboard({ data }: { data: SummaryData }) {
         />
         <MetricCard
           title="Net worth"
-          info="Gross asset balances minus liability principal, in goal currency (FX per line). Cash debt payments stay in Budget."
+          info="Gross asset balances minus liabilities, in goal currency (FX per line). Cash debt payments stay in Cash Flow."
           value={formatCurrency(data.netWorth, ccy, { maximumFractionDigits: 0 })}
         />
         <MetricCard
@@ -58,11 +58,12 @@ export function SummaryDashboard({ data }: { data: SummaryData }) {
       <Card>
         <CardHeader>
           <CardHeaderTitleRow
-            title={<CardTitle>Portfolio vs projection</CardTitle>}
+            title={<CardTitle>Net worth vs projection</CardTitle>}
             info={
               <>
-                Gross asset trajectory (returns, maturities, contributions), then liability principal is subtracted
-                as a flat total (v1). Withdrawal target: {formatPercent(data.assumedWithdrawalRate)}.
+                Gross asset trajectory (returns, maturities, contributions), then projected liabilities are
+                subtracted to show net worth through FI. Withdrawal target:{" "}
+                {formatPercent(data.assumedWithdrawalRate)}.
               </>
             }
           />

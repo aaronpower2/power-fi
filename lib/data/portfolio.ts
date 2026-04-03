@@ -10,6 +10,7 @@ import { loadRatesOnOrBefore } from "@/lib/currency/rates"
 import { utcIsoDateString } from "@/lib/dates"
 import { getDb } from "@/lib/db"
 import type { ChartPoint } from "@/lib/fi/types"
+import { getFiPlanPageData } from "@/lib/data/fi-plan"
 import {
   allocationRecords,
   allocationStrategies,
@@ -18,7 +19,6 @@ import {
   goals,
   liabilities,
 } from "@/lib/db/schema"
-import { getSummaryData } from "@/lib/data/summary"
 
 export type PortfolioAllocationRecordRow = typeof allocationRecords.$inferSelect
 
@@ -26,6 +26,7 @@ export type PortfolioLiabilityRow = {
   id: string
   name: string
   liabilityType: string | null
+  trackingMode: string
   currency: string
   currentBalance: string
   securedByAssetId: string | null
@@ -52,13 +53,13 @@ export type PortfolioPageData = {
   totalInvestedReporting: number | null
   /** Gross asset balances in selected summary currency (same as before liabilities). */
   currentPositionReporting: number | null
-  /** Total principal owed in selected summary currency; null if conversion failed. */
+  /** Total remaining owed in selected summary currency; null if conversion failed. */
   totalLiabilitiesReporting: number | null
   /** Gross assets minus liabilities in selected summary currency. */
   netPositionReporting: number | null
   /** End-of-month projected portfolio total, last month in each calendar year through FI year. */
   yearlyProjectedReporting: { year: number; projectedTotal: number }[]
-  /** Reporting currency for portfolio totals (Budget toolbar options; `ccy` query or goal default). */
+  /** Reporting currency for net-worth totals (Cash Flow toolbar options; `ccy` query or goal default). */
   summaryCurrency: BudgetSummaryCurrency
   summaryCurrencyOptions: typeof BUDGET_SUMMARY_CURRENCIES
   /** Same as `summaryCurrency` — display code for formatted totals. */
@@ -99,6 +100,7 @@ async function loadPortfolioLiabilities(db: AppDb): Promise<PortfolioLiabilityRo
       id: liabilities.id,
       name: liabilities.name,
       liabilityType: liabilities.liabilityType,
+      trackingMode: liabilities.trackingMode,
       currency: liabilities.currency,
       currentBalance: liabilities.currentBalance,
       securedByAssetId: liabilities.securedByAssetId,
@@ -332,7 +334,8 @@ export async function getPortfolioData(opts?: {
 
   const netPositionReporting = currentPositionReporting - totalLiabilitiesReporting
 
-  const summary = await getSummaryData()
+  const fiPlan = await getFiPlanPageData()
+  const summary = fiPlan.summary
   let yearlyProjectedReporting =
     summary.fxWarning == null && summary.chartSeries.length > 0
       ? chartPointsToYearEndTotals(summary.chartSeries)

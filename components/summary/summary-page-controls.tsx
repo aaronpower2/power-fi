@@ -13,6 +13,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import type { getSummaryData, SummaryGoalOption } from "@/lib/data/summary"
+import { dashboardRoutes } from "@/lib/routes"
 import { PieChart } from "lucide-react"
 
 type SummaryData = Awaited<ReturnType<typeof getSummaryData>>
@@ -26,6 +27,10 @@ export function SummaryPageControls({
 }) {
   const router = useRouter()
   const ccy = data.reportingCurrency
+  const primaryDrilldown =
+    data.reportingGoalId == null || data.goalFundable === false
+      ? { href: dashboardRoutes.goal, label: "Review Goal" }
+      : { href: dashboardRoutes.cashFlow, label: "Review Cash Flow" }
 
   return (
     <div className="flex w-full flex-nowrap items-center justify-between gap-2">
@@ -65,10 +70,13 @@ export function SummaryPageControls({
         )}
       </div>
       <div className="flex shrink-0 flex-nowrap items-center gap-2">
+        <Button asChild size="sm" variant="outline">
+          <Link href={primaryDrilldown.href}>{primaryDrilldown.label}</Link>
+        </Button>
         <Button asChild size="sm" className="gap-1.5">
-          <Link href="/portfolio">
+          <Link href={dashboardRoutes.netWorth}>
             <PieChart className="size-4 shrink-0" aria-hidden />
-            Portfolio
+            Net Worth
           </Link>
         </Button>
       </div>

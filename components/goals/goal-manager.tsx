@@ -14,6 +14,7 @@ import {
 } from "@/lib/actions/goal"
 import { SUPPORTED_CURRENCIES } from "@/lib/currency/iso4217"
 import type { BudgetCategoryPlannedForGoalCopy } from "@/lib/data/budget-categories-for-goal"
+import type { FiPlanPageData } from "@/lib/data/fi-plan"
 import type { GoalWithLifestyle } from "@/lib/data/goals"
 import { convertAmount } from "@/lib/currency/convert"
 import { formatGoalDisplayName } from "@/lib/goals/labels"
@@ -84,6 +85,28 @@ type CopyRow = BudgetCategoryPlannedForGoalCopy & {
   amountInGoal: number | null
   selectable: boolean
   reasonDisabled: string | null
+}
+
+function GoalPlanMetric({
+  title,
+  value,
+  detail,
+}: {
+  title: string
+  value: string
+  detail?: string
+}) {
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base">{title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="font-heading text-2xl font-semibold tabular-nums">{value}</p>
+        {detail ? <p className="text-muted-foreground mt-1 text-xs">{detail}</p> : null}
+      </CardContent>
+    </Card>
+  )
 }
 
 function CopyBudgetCategoriesIntoLifestyle({
@@ -213,7 +236,7 @@ function CopyBudgetCategoriesIntoLifestyle({
         <div className="border-border shrink-0 border-b px-4 py-3">
           <p className="text-sm font-semibold">Copy budget into lifestyle</p>
           <p className="text-muted-foreground mt-1 text-xs leading-relaxed">
-            Uses each category&apos;s smoothed monthly plan (same as Budget). New lines are appended; edit or remove
+            Uses each category&apos;s smoothed monthly plan (same as Cash Flow). New lines are appended; edit or remove
             afterward. Goal currency: <span className="text-foreground font-medium">{goalCurrency}</span>
             {fxAsOfDate ? (
               <span className="mt-1 block">FX as of {fxAsOfDate} when converting.</span>
@@ -227,12 +250,12 @@ function CopyBudgetCategoriesIntoLifestyle({
         <div className="max-h-[min(20rem,50vh)] overflow-y-auto px-4 py-2">
           {categories.length === 0 ? (
             <p className="text-muted-foreground text-sm">
-              No expense categories yet. Add them under Budget, then set recurring plans on categories you want here.
+              No expense categories yet. Add them under Cash Flow, then set recurring plans on categories you want here.
             </p>
           ) : selectableIds.length === 0 ? (
             <p className="text-muted-foreground text-sm">
               No categories have a convertible monthly plan for {goalCurrency}. Set recurring category budgets under
-              Budget first.
+              Cash Flow first.
             </p>
           ) : (
             <div className="space-y-3">
@@ -424,9 +447,11 @@ function LifestyleLinesFields({
 export function GoalManager({
   items,
   budgetCategoriesForLifestyleCopy,
+  planningData,
 }: {
   items: GoalWithLifestyle[]
   budgetCategoriesForLifestyleCopy: BudgetCategoriesForLifestyleCopyPayload
+  planningData: FiPlanPageData
 }) {
   const router = useRouter()
   const [pendingDelete, setPendingDelete] = useState<string | null>(null)
@@ -434,12 +459,13 @@ export function GoalManager({
   const [editing, setEditing] = useState<GoalWithLifestyle | null>(null)
 
   const refresh = () => router.refresh()
+  const activeGoal = items.find((item) => item.goal.id === planningData.summary.reportingGoalId) ?? null
 
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Goals"
-        description="FI date, withdrawal rate, and lifestyle lines set monthly funding. One active goal drives FI summary — use Edit on any row to change details, or Set active to switch."
+        title="Goal"
+        description="Define the FI destination, required number, and the path from current net worth plus monthly surplus to that target. The active goal drives FI Summary."
         controls={
           <Button size="sm" className="gap-1.5" onClick={() => setCreateDialogOpen(true)}>
             <Plus className="size-4 shrink-0" aria-hidden />
@@ -448,10 +474,78 @@ export function GoalManager({
         }
       />
 
+      {planningData.summary.fxWarning ? (
+        <p className="text-destructive bg-destructive/10 rounded-md border border-destructive/20 px-3 py-2 text-sm">
+          {planningData.summary.fxWarning}
+        </p>
+      ) : null}
+
+      {activeGoal ? (
+        <div className="space-y-4">
+          <div>
+            <p className="text-sm font-semibold">{formatGoalDisplayName(activeGoal.goal)}</p>
+            <p className="text-muted-foreground text-sm">
+              Active plan for FI Summary and projection outputs.
+            </p>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <GoalPlanMetric
+              title="Status"
+              value={
+                planningData.summary.goalFundable == null
+                  ? "—"
+                  : planningData.summary.goalFundable
+                    ? "On track"
+                    : "Gap"
+              }
+              detail={
+                planningData.summary.shortfall != null
+                  ? `${formatCurrency(
+                      planningData.summary.shortfall,
+                      planningData.summary.reportingCurrency,
+                      { maximumFractionDigits: 0 },
+                    )} below target`
+                  : undefined
+              }
+            />
+            <GoalPlanMetric
+              title="Required FI number"
+              value={formatCurrency(
+                planningData.summary.requiredPrincipal ?? null,
+                planningData.summary.reportingCurrency,
+                {
+                  maximumFractionDigits: 0,
+                },
+              )}
+            />
+            <GoalPlanMetric
+              title="Projected at FI date"
+              value={formatCurrency(
+                planningData.projectedNetWorthAtFi ?? null,
+                planningData.summary.reportingCurrency,
+                {
+                  maximumFractionDigits: 0,
+                },
+              )}
+            />
+            <GoalPlanMetric
+              title="Monthly investable"
+              value={formatCurrency(
+                planningData.monthlyInvestable ?? null,
+                planningData.summary.reportingCurrency,
+                {
+                  maximumFractionDigits: 0,
+                },
+              )}
+            />
+          </div>
+        </div>
+      ) : null}
+
       <Card>
         <CardHeader>
           <CardHeaderTitleRow
-            title={<CardTitle>Goals</CardTitle>}
+            title={<CardTitle>Saved goals</CardTitle>}
             info={
               <>
                 The goal marked <span className="text-foreground font-medium">Active</span> is used for FI summary and

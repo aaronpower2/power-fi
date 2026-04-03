@@ -1,5 +1,6 @@
-import { PortfolioManager } from "@/components/portfolio/portfolio-manager"
-import { getPortfolioData } from "@/lib/data/portfolio"
+import { redirect } from "next/navigation"
+
+import { dashboardRoutes } from "@/lib/routes"
 
 export const dynamic = "force-dynamic"
 
@@ -9,11 +10,7 @@ export default async function PortfolioPage({
   searchParams: Promise<{ ccy?: string }>
 }) {
   const sp = await searchParams
-  const data = await getPortfolioData({ summaryCurrency: sp.ccy ?? null })
-
-  return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-8">
-      <PortfolioManager data={data} />
-    </div>
-  )
+  const params = new URLSearchParams()
+  if (sp.ccy) params.set("ccy", sp.ccy)
+  redirect(`${dashboardRoutes.netWorth}${params.size > 0 ? `?${params.toString()}` : ""}`)
 }

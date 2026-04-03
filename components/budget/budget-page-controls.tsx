@@ -21,6 +21,7 @@ import { AllocateInvestableCapitalCta } from "@/components/budget/allocate-inves
 import { finalizeBudgetMonth } from "@/lib/actions/budget"
 import type { getBudgetPageData } from "@/lib/data/budget"
 import { addMonthsToYm, formatYearMonthYm, parseYearMonthYm } from "@/lib/dates"
+import { dashboardRoutes } from "@/lib/routes"
 
 type BudgetData = Awaited<ReturnType<typeof getBudgetPageData>>
 
@@ -83,7 +84,7 @@ function BudgetMonthSelector({
   function commit(nextYear: number, nextMonthIndex0: number) {
     const ym = formatYearMonthYm(nextYear, nextMonthIndex0)
     if (ym !== data.ym) {
-      router.push(`/budget?${budgetQuery(ym)}`)
+      router.push(`${dashboardRoutes.cashFlow}?${budgetQuery(ym)}`)
     }
     setPickerOpen(false)
   }
@@ -97,7 +98,7 @@ function BudgetMonthSelector({
     const d = new Date()
     const ym = formatYearMonthYm(d.getUTCFullYear(), d.getUTCMonth())
     if (ym !== data.ym) {
-      router.push(`/budget?${budgetQuery(ym)}`)
+      router.push(`${dashboardRoutes.cashFlow}?${budgetQuery(ym)}`)
     }
   }
 
@@ -106,7 +107,7 @@ function BudgetMonthSelector({
       <div
         className="bg-muted/40 relative inline-flex items-center rounded-lg border p-0.5"
         role="group"
-        aria-label="Budget month"
+        aria-label="Cash flow month"
       >
       <Button
         type="button"
@@ -231,7 +232,7 @@ function BudgetSummaryCurrencySwitch({ data }: { data: BudgetData }) {
     const p = new URLSearchParams()
     p.set("ym", data.ym)
     p.set("ccy", ccy)
-    router.push(`/budget?${p.toString()}`)
+    router.push(`${dashboardRoutes.cashFlow}?${p.toString()}`)
   }
 
   return (
@@ -270,7 +271,7 @@ export function BudgetPageControls({ data }: { data: BudgetData }) {
 
   function goMonth(delta: number) {
     const next = addMonthsToYm(data.ym, delta)
-    router.push(`/budget?${budgetQuery(next)}`)
+    router.push(`${dashboardRoutes.cashFlow}?${budgetQuery(next)}`)
   }
 
   return (

@@ -1,4 +1,4 @@
-import { asc, desc, eq } from "drizzle-orm"
+import { and, asc, desc, eq, gte, lte } from "drizzle-orm"
 
 import { monthlyPlannedForExpenseCategory, monthlyPlannedForLine } from "@/lib/budget/planned-line"
 import {
@@ -27,6 +27,7 @@ import {
   goals,
   incomeLines,
   incomeRecords,
+  liabilities,
 } from "@/lib/db/schema"
 
 /** Per budget line id → per ISO currency → sum for the UTC month (not converted). */
@@ -38,37 +39,6 @@ function groupIncomeRecords(
   const m: Record<string, (typeof incomeRecords.$inferSelect)[]> = {}
   for (const r of rows) {
     const k = r.incomeLineId
-    if (!m[k]) m[k] = []
-    m[k].push(r)
-  }
-  for (const k of Object.keys(m)) {
-    m[k].sort((a, b) => (a.occurredOn < b.occurredOn ? 1 : -1))
-  }
-  return m
-}
-
-function groupExpenseRecords(
-  rows: (typeof expenseRecords.$inferSelect)[],
-): Record<string, (typeof expenseRecords.$inferSelect)[]> {
-  const m: Record<string, (typeof expenseRecords.$inferSelect)[]> = {}
-  for (const r of rows) {
-    const k = r.expenseLineId
-    if (!k) continue
-    if (!m[k]) m[k] = []
-    m[k].push(r)
-  }
-  for (const k of Object.keys(m)) {
-    m[k].sort((a, b) => (a.occurredOn < b.occurredOn ? 1 : -1))
-  }
-  return m
-}
-
-function groupExpenseRecordsByCategory(
-  rows: (typeof expenseRecords.$inferSelect)[],
-): Record<string, (typeof expenseRecords.$inferSelect)[]> {
-  const m: Record<string, (typeof expenseRecords.$inferSelect)[]> = {}
-  for (const r of rows) {
-    const k = r.expenseCategoryId
     if (!m[k]) m[k] = []
     m[k].push(r)
   }
@@ -124,52 +94,50 @@ function sumNativeLineMapInReportingCurrency(args: {
   return { total, ok: true }
 }
 
-/** Sum each line’s native buckets into reporting currency, then roll up by category id. */
-function sumLineMapByCategoryId(args: {
-  lines: Array<{ id: string; categoryId: string }>
+function convertNativeLineMapToReportingTotals(args: {
   lineMap: LineNativeMonthTotals
   reportingCurrency: string
   fx: { rates: Map<string, number> } | null
-}): Record<string, number> {
-  const { lines, lineMap, reportingCurrency, fx } = args
-  const out: Record<string, number> = {}
-  for (const line of lines) {
-    const buckets = lineMap[line.id]
-    if (!buckets || Object.keys(buckets).length === 0) continue
-    const single: LineNativeMonthTotals = { [line.id]: buckets }
-    const r = sumNativeLineMapInReportingCurrency({
-      lineMap: single,
-      reportingCurrency,
-      fx,
-    })
-    if (!r.ok) continue
-    const k = line.categoryId
-    out[k] = (out[k] ?? 0) + r.total
+}): { totalsById: Record<string, number>; ok: boolean } {
+  const { lineMap, reportingCurrency, fx } = args
+  const totalsById: Record<string, number> = {}
+  if (!fx) {
+    for (const [lineId, buckets] of Object.entries(lineMap)) {
+      let total = 0
+      for (const amount of Object.values(buckets)) total += amount
+      totalsById[lineId] = total
+    }
+    return { totalsById, ok: true }
   }
-  return out
+  const rates = fx.rates
+  for (const [lineId, buckets] of Object.entries(lineMap)) {
+    let total = 0
+    for (const [currency, amount] of Object.entries(buckets)) {
+      const converted = convertAmount(amount, currency, reportingCurrency, rates)
+      if (converted == null) return { totalsById: {}, ok: false }
+      total += converted
+    }
+    totalsById[lineId] = total
+  }
+  return { totalsById, ok: true }
 }
 
 function sumIncomeRecordsInReportingCurrency(args: {
-  allIncomeRec: (typeof incomeRecords.$inferSelect)[]
-  start: string
-  end: string
+  rows: (typeof incomeRecords.$inferSelect)[]
   reportingCurrency: string
   fx: { rates: Map<string, number> } | null
 }): { income: number; ok: boolean } {
-  const { allIncomeRec, start, end, reportingCurrency, fx } = args
+  const { rows, reportingCurrency, fx } = args
   if (!fx) {
     let income = 0
-    for (const r of allIncomeRec) {
-      if (r.occurredOn >= start && r.occurredOn <= end) {
-        income += Number(r.amount)
-      }
+    for (const r of rows) {
+      income += Number(r.amount)
     }
     return { income, ok: true }
   }
   const rates = fx.rates
   let income = 0
-  for (const r of allIncomeRec) {
-    if (r.occurredOn < start || r.occurredOn > end) continue
+  for (const r of rows) {
     const cur = r.currency ?? "USD"
     const v = convertAmount(Number(r.amount), cur, reportingCurrency, rates)
     if (v == null) return { income: 0, ok: false }
@@ -179,26 +147,21 @@ function sumIncomeRecordsInReportingCurrency(args: {
 }
 
 function sumExpenseRecordsInReportingCurrency(args: {
-  allExpRec: (typeof expenseRecords.$inferSelect)[]
-  start: string
-  end: string
+  rows: (typeof expenseRecords.$inferSelect)[]
   reportingCurrency: string
   fx: { rates: Map<string, number> } | null
 }): { expense: number; ok: boolean } {
-  const { allExpRec, start, end, reportingCurrency, fx } = args
+  const { rows, reportingCurrency, fx } = args
   if (!fx) {
     let expense = 0
-    for (const r of allExpRec) {
-      if (r.occurredOn >= start && r.occurredOn <= end) {
-        expense += Number(r.amount)
-      }
+    for (const r of rows) {
+      expense += Number(r.amount)
     }
     return { expense, ok: true }
   }
   const rates = fx.rates
   let expense = 0
-  for (const r of allExpRec) {
-    if (r.occurredOn < start || r.occurredOn > end) continue
+  for (const r of rows) {
     const cur = r.currency ?? "USD"
     const v = convertAmount(Number(r.amount), cur, reportingCurrency, rates)
     if (v == null) return { expense: 0, ok: false }
@@ -219,6 +182,8 @@ const empty = {
     incomePlanned: 0,
     expenseActual: 0,
     expensePlanned: 0,
+    debtPaymentActual: 0,
+    debtPaymentPlanned: 0,
     investableActual: 0,
   },
   summaryCurrency: "AED" as const,
@@ -230,6 +195,12 @@ const empty = {
   incomeActualByLineNative: {} as LineNativeMonthTotals,
   incomePlannedByLineNative: {} as LineNativeMonthTotals,
   expenseCategories: [] as (typeof expenseCategories.$inferSelect)[],
+  liabilityOptions: [] as {
+    id: string
+    name: string
+    trackingMode: string
+    currency: string
+  }[],
   expenseLines: [] as ((typeof expenseLines.$inferSelect) & { categoryName: string })[],
   expenseTransactionsByCategoryId: {} as Record<
     string,
@@ -244,8 +215,6 @@ const empty = {
       isManual: boolean
     }[]
   >,
-  expenseRecordsByCategoryId: {} as Record<string, (typeof expenseRecords.$inferSelect)[]>,
-  expenseRecordsByLineId: {} as Record<string, (typeof expenseRecords.$inferSelect)[]>,
   expenseActualByCategoryNative: {} as LineNativeMonthTotals,
   expenseActualByLineNative: {} as LineNativeMonthTotals,
   expensePlannedByLineNative: {} as LineNativeMonthTotals,
@@ -297,47 +266,103 @@ export async function getBudgetPageData(opts?: {
   const currentMonthStart = utcMonthRangeStrings(now).start
   const isPastMonth = start < currentMonthStart
 
-  const [activeGoal] = await db
+  const activeGoalPromise = db
     .select()
     .from(goals)
     .where(eq(goals.isActive, true))
     .orderBy(desc(goals.updatedAt))
     .limit(1)
+
+  const liabilityOptionsPromise = db
+    .select({
+      id: liabilities.id,
+      name: liabilities.name,
+      trackingMode: liabilities.trackingMode,
+      currency: liabilities.currency,
+    })
+    .from(liabilities)
+    .orderBy(asc(liabilities.name))
+
+  const fxPromise = loadRatesOnOrBefore(db, utcIsoDateString(now))
+  const linesRawPromise = db.select().from(incomeLines)
+  const monthIncomeRecPromise = db
+    .select()
+    .from(incomeRecords)
+    .where(and(gte(incomeRecords.occurredOn, start), lte(incomeRecords.occurredOn, end)))
+  const monthExpRecPromise = db
+    .select()
+    .from(expenseRecords)
+    .where(and(gte(expenseRecords.occurredOn, start), lte(expenseRecords.occurredOn, end)))
+  const monthTxRowsPromise = db
+    .select()
+    .from(budgetMonthTransactions)
+    .where(eq(budgetMonthTransactions.periodMonth, start))
+  const snapshotRowsPromise = db
+    .select()
+    .from(budgetMonthPlanLines)
+    .where(eq(budgetMonthPlanLines.periodMonth, start))
+  const catsPromise = db
+    .select()
+    .from(expenseCategories)
+    .orderBy(asc(expenseCategories.sortOrder), asc(expenseCategories.name))
+  const expLinesFullPromise = db
+    .select({
+      id: expenseLines.id,
+      categoryId: expenseLines.categoryId,
+      name: expenseLines.name,
+      createdAt: expenseLines.createdAt,
+      categoryName: expenseCategories.name,
+    })
+    .from(expenseLines)
+    .innerJoin(expenseCategories, eq(expenseLines.categoryId, expenseCategories.id))
+    .orderBy(asc(expenseCategories.sortOrder), asc(expenseLines.name))
+  const activeStratPromise = db
+    .select()
+    .from(allocationStrategies)
+    .where(eq(allocationStrategies.isActive, true))
+    .orderBy(desc(allocationStrategies.updatedAt))
+    .limit(1)
+
+  const [
+    activeGoalRows,
+    liabilityOptions,
+    fx,
+    linesRaw,
+    monthIncomeRec,
+    monthExpRec,
+    monthTxRows,
+    snapshotRows,
+    cats,
+    expLinesFull,
+    activeStratRows,
+  ] = await Promise.all([
+    activeGoalPromise,
+    liabilityOptionsPromise,
+    fxPromise,
+    linesRawPromise,
+    monthIncomeRecPromise,
+    monthExpRecPromise,
+    monthTxRowsPromise,
+    snapshotRowsPromise,
+    catsPromise,
+    expLinesFullPromise,
+    activeStratPromise,
+  ])
+
+  const activeGoal = activeGoalRows[0]
   const goalCurrency = activeGoal?.currency ?? "AED"
   const summaryCurrency = resolveBudgetSummaryCurrency(opts?.summaryCurrency, goalCurrency)
-
-  const fx = await loadRatesOnOrBefore(db, utcIsoDateString(now))
   let fxWarning: string | null = null
   if (!fx) {
     fxWarning =
       "No conversion rates loaded yet — summary totals may be unreliable if amounts use multiple currencies. Line tables stay in each line’s native currency."
   }
 
-  const linesRaw = await db.select().from(incomeLines)
-  const allIncomeRec = await db.select().from(incomeRecords)
-  const allExpRec = await db.select().from(expenseRecords)
-  const monthTxRows = await db
-    .select()
-    .from(budgetMonthTransactions)
-    .where(eq(budgetMonthTransactions.periodMonth, start))
-
-  const snapshotRows = await db
-    .select()
-    .from(budgetMonthPlanLines)
-    .where(eq(budgetMonthPlanLines.periodMonth, start))
-
   const planUsesSnapshot = isPastMonth && snapshotRows.length > 0
 
-  const cats = await db
-    .select()
-    .from(expenseCategories)
-    .orderBy(asc(expenseCategories.sortOrder), asc(expenseCategories.name))
-
   const incomeActualByLineNative: LineNativeMonthTotals = {}
-  for (const r of allIncomeRec) {
-    if (r.occurredOn >= start && r.occurredOn <= end) {
-      bumpNative(incomeActualByLineNative, r.incomeLineId, r.currency ?? "USD", Number(r.amount))
-    }
+  for (const r of monthIncomeRec) {
+    bumpNative(incomeActualByLineNative, r.incomeLineId, r.currency ?? "USD", Number(r.amount))
   }
 
   const incomePlannedByLineNative: LineNativeMonthTotals = {}
@@ -359,31 +384,17 @@ export async function getBudgetPageData(opts?: {
 
   const expenseActualByCategoryNative: LineNativeMonthTotals = {}
   const expenseActualByLineNative: LineNativeMonthTotals = {}
-  for (const r of allExpRec) {
-    if (r.occurredOn >= start && r.occurredOn <= end) {
-      bumpNative(
-        expenseActualByCategoryNative,
-        r.expenseCategoryId,
-        r.currency ?? "USD",
-        Number(r.amount),
-      )
-      if (r.expenseLineId) {
-        bumpNative(expenseActualByLineNative, r.expenseLineId, r.currency ?? "USD", Number(r.amount))
-      }
+  for (const r of monthExpRec) {
+    bumpNative(
+      expenseActualByCategoryNative,
+      r.expenseCategoryId,
+      r.currency ?? "USD",
+      Number(r.amount),
+    )
+    if (r.expenseLineId) {
+      bumpNative(expenseActualByLineNative, r.expenseLineId, r.currency ?? "USD", Number(r.amount))
     }
   }
-
-  const expLinesFull = await db
-    .select({
-      id: expenseLines.id,
-      categoryId: expenseLines.categoryId,
-      name: expenseLines.name,
-      createdAt: expenseLines.createdAt,
-      categoryName: expenseCategories.name,
-    })
-    .from(expenseLines)
-    .innerJoin(expenseCategories, eq(expenseLines.categoryId, expenseCategories.id))
-    .orderBy(asc(expenseCategories.sortOrder), asc(expenseLines.name))
 
   /** Category id → native currency buckets for planned expense (envelope per category). */
   const expensePlannedByCategoryNative: LineNativeMonthTotals = {}
@@ -422,9 +433,7 @@ export async function getBudgetPageData(opts?: {
   const expensePlannedByLineNative: LineNativeMonthTotals = {}
 
   let incomeActual = sumIncomeRecordsInReportingCurrency({
-    allIncomeRec,
-    start,
-    end,
+    rows: monthIncomeRec,
     reportingCurrency: summaryCurrency,
     fx,
   })
@@ -434,9 +443,7 @@ export async function getBudgetPageData(opts?: {
     fx,
   })
   let expenseActual = sumExpenseRecordsInReportingCurrency({
-    allExpRec,
-    start,
-    end,
+    rows: monthExpRec,
     reportingCurrency: summaryCurrency,
     fx,
   })
@@ -458,9 +465,7 @@ export async function getBudgetPageData(opts?: {
     fxWarning = `Could not convert some flows to ${summaryCurrency} for the summary row.`
     summaryFxForCategory = null
     incomeActual = sumIncomeRecordsInReportingCurrency({
-      allIncomeRec,
-      start,
-      end,
+      rows: monthIncomeRec,
       reportingCurrency: summaryCurrency,
       fx: null,
     })
@@ -470,9 +475,7 @@ export async function getBudgetPageData(opts?: {
       fx: null,
     })
     expenseActual = sumExpenseRecordsInReportingCurrency({
-      allExpRec,
-      start,
-      end,
+      rows: monthExpRec,
       reportingCurrency: summaryCurrency,
       fx: null,
     })
@@ -488,12 +491,25 @@ export async function getBudgetPageData(opts?: {
     (incomeActual.ok ? incomeActual.income : 0) - (expenseActual.ok ? expenseActual.expense : 0),
   )
 
-  const [activeStrat] = await db
-    .select()
-    .from(allocationStrategies)
-    .where(eq(allocationStrategies.isActive, true))
-    .orderBy(desc(allocationStrategies.updatedAt))
-    .limit(1)
+  const debtCategoryIds = new Set(
+    cats.filter((c) => c.cashFlowType === "debt_payment").map((c) => c.id),
+  )
+  const regularCategoryIds = new Set(
+    cats.filter((c) => c.cashFlowType !== "debt_payment").map((c) => c.id),
+  )
+  const splitCategoryTotals = (
+    totalsByCategoryId: Record<string, number>,
+  ): { expense: number; debtPayment: number } => {
+    let expense = 0
+    let debtPayment = 0
+    for (const [categoryId, total] of Object.entries(totalsByCategoryId)) {
+      if (debtCategoryIds.has(categoryId)) debtPayment += total
+      else if (regularCategoryIds.has(categoryId)) expense += total
+    }
+    return { expense, debtPayment }
+  }
+
+  const activeStrat = activeStratRows[0]
 
   let strategyAllocate: {
     /** True when an active strategy has targets with a positive weight sum (button enabled). Investable may still be zero; server rejects that case. */
@@ -519,7 +535,7 @@ export async function getBudgetPageData(opts?: {
   if (!activeStrat) {
     strategyAllocate = {
       canAllocate: false,
-      disabledReason: "No active portfolio strategy (set one under Portfolio → Strategy).",
+      disabledReason: "No active strategy (set one under Net Worth → Strategy).",
       targetCount: 0,
       weightSum: 0,
     }
@@ -608,8 +624,7 @@ export async function getBudgetPageData(opts?: {
       isManual: boolean
     }[]
   > = {}
-  for (const r of allExpRec) {
-    if (r.occurredOn < start || r.occurredOn > end) continue
+  for (const r of monthExpRec) {
     const tx = expenseLedgerByRecordId.get(r.id)
     const description =
       tx?.description ??
@@ -634,28 +649,20 @@ export async function getBudgetPageData(opts?: {
     )
   }
 
-  const expensePlannedByCategoryId: Record<string, number> = {}
-  for (const c of cats) {
-    const buckets = expensePlannedByCategoryNative[c.id]
-    if (!buckets || Object.keys(buckets).length === 0) continue
-    const r = sumNativeLineMapInReportingCurrency({
-      lineMap: { [c.id]: buckets },
-      reportingCurrency: summaryCurrency,
-      fx: summaryFxForCategory,
-    })
-    if (r.ok) expensePlannedByCategoryId[c.id] = r.total
-  }
-  const expenseActualByCategoryId: Record<string, number> = {}
-  for (const c of cats) {
-    const buckets = expenseActualByCategoryNative[c.id]
-    if (!buckets || Object.keys(buckets).length === 0) continue
-    const r = sumNativeLineMapInReportingCurrency({
-      lineMap: { [c.id]: buckets },
-      reportingCurrency: summaryCurrency,
-      fx: summaryFxForCategory,
-    })
-    if (r.ok) expenseActualByCategoryId[c.id] = r.total
-  }
+  const plannedByCategoryResult = convertNativeLineMapToReportingTotals({
+    lineMap: expensePlannedByCategoryNative,
+    reportingCurrency: summaryCurrency,
+    fx: summaryFxForCategory,
+  })
+  const expensePlannedByCategoryId = plannedByCategoryResult.ok ? plannedByCategoryResult.totalsById : {}
+  const actualByCategoryResult = convertNativeLineMapToReportingTotals({
+    lineMap: expenseActualByCategoryNative,
+    reportingCurrency: summaryCurrency,
+    fx: summaryFxForCategory,
+  })
+  const expenseActualByCategoryId = actualByCategoryResult.ok ? actualByCategoryResult.totalsById : {}
+  const plannedSplit = splitCategoryTotals(expensePlannedByCategoryId)
+  const actualSplit = splitCategoryTotals(expenseActualByCategoryId)
 
   return {
     ym,
@@ -667,8 +674,10 @@ export async function getBudgetPageData(opts?: {
     totals: {
       incomeActual: incomeActual.ok ? incomeActual.income : 0,
       incomePlanned: incomePlanned.ok ? incomePlanned.total : 0,
-      expenseActual: expenseActual.ok ? expenseActual.expense : 0,
-      expensePlanned: expensePlanned.ok ? expensePlanned.total : 0,
+      expenseActual: actualSplit.expense,
+      expensePlanned: plannedSplit.expense,
+      debtPaymentActual: actualSplit.debtPayment,
+      debtPaymentPlanned: plannedSplit.debtPayment,
       investableActual,
     },
     summaryCurrency,
@@ -676,14 +685,13 @@ export async function getBudgetPageData(opts?: {
     goalCurrency,
     fxWarning,
     incomeLines: lines,
-    incomeRecordsByLineId: groupIncomeRecords(allIncomeRec),
+    incomeRecordsByLineId: groupIncomeRecords(monthIncomeRec),
     incomeActualByLineNative,
     incomePlannedByLineNative,
     expenseCategories: cats,
+    liabilityOptions,
     expenseLines: expLinesForMonth,
     expenseTransactionsByCategoryId,
-    expenseRecordsByCategoryId: groupExpenseRecordsByCategory(allExpRec),
-    expenseRecordsByLineId: groupExpenseRecords(allExpRec),
     expenseActualByCategoryNative,
     expenseActualByLineNative,
     expensePlannedByLineNative,
