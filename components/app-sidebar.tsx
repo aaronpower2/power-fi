@@ -27,8 +27,8 @@ import {
 const nav = [
   { href: "/summary", label: "FI Summary", icon: LayoutDashboard },
   { href: "/portfolio", label: "Portfolio", icon: PieChart },
-  { href: "/budget", label: "Budget", icon: Wallet },
   { href: "/goal", label: "Goal", icon: Target },
+  { href: "/budget", label: "Budget", icon: Wallet },
 ] as const
 
 export function AppSidebar() {

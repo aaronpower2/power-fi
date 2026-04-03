@@ -6,6 +6,8 @@ import { parseMoneyString } from "@/lib/imports/parse-money"
 const DATE_KEYS = /^(date|transaction\s*date|posted|value\s*date|booking\s*date|tran\s*date)$/i
 const AMOUNT_KEYS = /^(amount|transaction\s*amount|debit|credit|withdrawal|deposit|value)$/i
 const DESC_KEYS = /^(description|details|merchant|payee|narrative|memo|note|transaction\s*details)$/i
+const AMOUNT_OUT_KEYS = /^(amount\s*out|money\s*out|debit|withdrawal)$/i
+const AMOUNT_IN_KEYS = /^(amount\s*in|money\s*in|credit|deposit)$/i
 
 function normHeader(cell: unknown): string {
   return String(cell ?? "")
@@ -20,8 +22,8 @@ function scoreHeader(h: string): { date: number; amount: number; desc: number; d
     date: DATE_KEYS.test(n) ? 10 : n.includes("date") ? 5 : 0,
     amount: AMOUNT_KEYS.test(n) && !n.includes("balance") ? 10 : n.includes("amount") ? 5 : 0,
     desc: DESC_KEYS.test(n) ? 10 : n.includes("desc") || n.includes("merchant") ? 5 : 0,
-    debit: /^debit$/i.test(n) ? 10 : n.includes("debit") ? 5 : 0,
-    credit: /^credit$/i.test(n) ? 10 : n.includes("credit") ? 5 : 0,
+    debit: AMOUNT_OUT_KEYS.test(n) ? 10 : n.includes("debit") || n.includes("amount out") ? 5 : 0,
+    credit: AMOUNT_IN_KEYS.test(n) ? 10 : n.includes("credit") || n.includes("amount in") ? 5 : 0,
   }
 }
 
@@ -96,6 +98,20 @@ function parseDateCell(v: unknown): string | null {
   return null
 }
 
+function parseDayFirstDateCell(v: unknown): string | null {
+  if (v == null || v === "") return null
+  if (typeof v === "number") return parseExcelDate(v)
+  const s = String(v).trim()
+  if (!s) return null
+  const dmy = s.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})$/)
+  if (!dmy) return null
+  let y = Number(dmy[3])
+  if (y < 100) y += 2000
+  const mo = String(Number(dmy[2])).padStart(2, "0")
+  const da = String(Number(dmy[1])).padStart(2, "0")
+  return `${y}-${mo}-${da}`
+}
+
 function rowsFromSheet(sheet: XLSX.WorkSheet): unknown[][] {
   return XLSX.utils.sheet_to_json<unknown[]>(sheet, {
     header: 1,
@@ -108,14 +124,16 @@ function parseRowsWithMapping(
   rows: unknown[][],
   map: ColumnMapping,
   currencyDefault: string,
+  opts: { parseDate?: (value: unknown) => string | null } = {},
 ): NormalizedImportRow[] {
+  const parseDate = opts.parseDate ?? parseDateCell
   const out: NormalizedImportRow[] = []
   let idx = 0
   for (let r = 0; r < rows.length; r++) {
     const row = rows[r]
     if (!row || row.length === 0) continue
     const dateRaw = row[map.dateCol]
-    const occurredOn = parseDateCell(dateRaw)
+    const occurredOn = parseDate(dateRaw)
     if (!occurredOn) continue
 
     let amount = 0
@@ -132,18 +150,18 @@ function parseRowsWithMapping(
       const creditRaw = row[map.creditCol]
       const debit =
         typeof debitRaw === "number" && debitRaw !== 0
-          ? debitRaw
-          : parseMoneyString(String(debitRaw ?? "")) ?? 0
+          ? Math.abs(debitRaw)
+          : Math.abs(parseMoneyString(String(debitRaw ?? "")) ?? 0)
       const credit =
         typeof creditRaw === "number" && creditRaw !== 0
-          ? creditRaw
-          : parseMoneyString(String(creditRaw ?? "")) ?? 0
+          ? Math.abs(creditRaw)
+          : Math.abs(parseMoneyString(String(creditRaw ?? "")) ?? 0)
       if (debit && credit) {
-        amount = Math.abs(debit) >= Math.abs(credit) ? debit : -credit
+        amount = debit >= credit ? debit : credit
       } else if (debit) {
         amount = debit
       } else if (credit) {
-        amount = -credit
+        amount = credit
       } else {
         continue
       }
@@ -186,6 +204,93 @@ function findHeaderRowIndex(rows: unknown[][]): number {
   return best
 }
 
+function detectHeaderlessBankCsvShape(rows: unknown[][]): {
+  amountCol: number
+  balanceCol: number
+} | null {
+  let matched = 0
+  let detected: { amountCol: number; balanceCol: number } | null = null
+
+  for (const row of rows.slice(0, 10)) {
+    if (!row || row.length < 4) continue
+    if (!parseDayFirstDateCell(row[0])) continue
+
+    let balanceCol = -1
+    let amountCol = -1
+    for (let i = row.length - 1; i >= 1; i--) {
+      const parsed = parseMoneyString(String(row[i] ?? ""))
+      if (parsed == null) continue
+      if (balanceCol < 0) {
+        balanceCol = i
+        continue
+      }
+      amountCol = i
+      break
+    }
+
+    if (amountCol <= 0 || balanceCol <= amountCol) continue
+    matched++
+    if (!detected) detected = { amountCol, balanceCol }
+  }
+
+  return matched >= 2 ? detected : null
+}
+
+function parseHeaderlessBankCsvRows(
+  rows: unknown[][],
+  currencyDefault: string,
+): { rows: NormalizedImportRow[]; mapping: ColumnMapping; headerRowIndex: number } | null {
+  const detected = detectHeaderlessBankCsvShape(rows)
+  if (!detected) return null
+
+  const out: NormalizedImportRow[] = []
+  let idx = 0
+  for (let r = 0; r < rows.length; r++) {
+    const row = rows[r]
+    if (!row || row.length <= detected.amountCol) continue
+    const occurredOn = parseDayFirstDateCell(row[0])
+    if (!occurredOn) continue
+    const amount = parseMoneyString(String(row[detected.amountCol] ?? ""))
+    if (amount == null || amount === 0) continue
+
+    const description = row
+      .slice(1, detected.amountCol)
+      .map((cell) => String(cell ?? "").trim())
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+/g, " ")
+
+    out.push({
+      occurredOn,
+      amount,
+      currency: currencyDefault,
+      description: description || "(no description)",
+      rawPayload: { rowIndex: r, cells: row.map((c) => String(c ?? "")) },
+      parserRowIndex: idx++,
+    })
+  }
+
+  return {
+    rows: out,
+    mapping: {
+      dateCol: 0,
+      amountCol: detected.amountCol,
+      debitCol: null,
+      creditCol: null,
+      descCol: 1,
+    },
+    headerRowIndex: -1,
+  }
+}
+
+function isDayFirstBankHeaderRow(headerRow: unknown[]): boolean {
+  const normalized = headerRow.map((cell) => normHeader(cell))
+  return normalized.includes("date") &&
+    normalized.includes("description") &&
+    normalized.includes("amount in") &&
+    normalized.includes("amount out")
+}
+
 function parseFirstSheetFromWorkbook(
   wb: XLSX.WorkBook,
   currencyDefault: string,
@@ -214,7 +319,9 @@ function parseFirstSheetFromWorkbook(
     )
   }
   const dataRows = rows.slice(headerRowIndex + 1)
-  const parsed = parseRowsWithMapping(dataRows, map, currencyDefault)
+  const parsed = parseRowsWithMapping(dataRows, map, currencyDefault, {
+    parseDate: isDayFirstBankHeaderRow(headerRow) ? parseDayFirstDateCell : parseDateCell,
+  })
   return { rows: parsed, mapping: map, headerRowIndex }
 }
 
@@ -233,5 +340,15 @@ export function parseCsvText(
 ): { rows: NormalizedImportRow[]; mapping: ColumnMapping; headerRowIndex: number } {
   const currencyDefault = opts.currencyDefault ?? "AED"
   const wb = XLSX.read(text, { type: "string", raw: true })
-  return parseFirstSheetFromWorkbook(wb, currencyDefault, 0)
+  try {
+    return parseFirstSheetFromWorkbook(wb, currencyDefault, 0)
+  } catch (error) {
+    const name = wb.SheetNames[0]
+    if (!name) throw error
+    const sheet = wb.Sheets[name]
+    const rows = rowsFromSheet(sheet)
+    const fallback = parseHeaderlessBankCsvRows(rows, currencyDefault)
+    if (fallback) return fallback
+    throw error
+  }
 }

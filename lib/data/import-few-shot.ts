@@ -3,16 +3,15 @@ import { and, eq, isNotNull } from "drizzle-orm"
 import { getDb } from "@/lib/db"
 import {
   expenseCategories,
-  expenseLines,
   importedTransactions,
   incomeLines,
 } from "@/lib/db/schema"
 
 export type ImportFewShotExample = {
   description_snippet: string
-  line_id: string
-  line_kind: "expense" | "income"
-  line_label: string
+  target_id: string
+  target_kind: "expense_category" | "income_line"
+  target_label: string
 }
 
 /** Normalize bank description for grouping similar strings. */
@@ -32,7 +31,7 @@ function fewShotLimit(): number {
 }
 
 /**
- * Posted import rows aggregated by normalized description + line → top examples for the matcher prompt.
+ * Posted import rows aggregated by normalized description + category/line → top examples for the matcher prompt.
  */
 export async function loadImportFewShotExamples(): Promise<ImportFewShotExample[]> {
   const db = getDb()
@@ -42,15 +41,13 @@ export async function loadImportFewShotExamples(): Promise<ImportFewShotExample[
     .select({
       description: importedTransactions.description,
       postedRecordKind: importedTransactions.postedRecordKind,
-      expenseLineId: importedTransactions.suggestedExpenseLineId,
+      expenseCategoryId: importedTransactions.suggestedExpenseCategoryId,
       incomeLineId: importedTransactions.suggestedIncomeLineId,
-      expenseLineName: expenseLines.name,
-      expenseCatName: expenseCategories.name,
+      expenseCategoryName: expenseCategories.name,
       incomeLineName: incomeLines.name,
     })
     .from(importedTransactions)
-    .leftJoin(expenseLines, eq(importedTransactions.suggestedExpenseLineId, expenseLines.id))
-    .leftJoin(expenseCategories, eq(expenseLines.categoryId, expenseCategories.id))
+    .leftJoin(expenseCategories, eq(importedTransactions.suggestedExpenseCategoryId, expenseCategories.id))
     .leftJoin(incomeLines, eq(importedTransactions.suggestedIncomeLineId, incomeLines.id))
     .where(
       and(
@@ -61,9 +58,9 @@ export async function loadImportFewShotExamples(): Promise<ImportFewShotExample[
 
   type Agg = {
     count: number
-    line_id: string
-    line_kind: "expense" | "income"
-    line_label: string
+    target_id: string
+    target_kind: "expense_category" | "income_line"
+    target_label: string
     example_snippet: string
   }
 
@@ -73,21 +70,19 @@ export async function loadImportFewShotExamples(): Promise<ImportFewShotExample[
     const kind = r.postedRecordKind
     if (kind !== "expense" && kind !== "income") continue
 
-    const lineId =
-      kind === "expense" ? r.expenseLineId : r.incomeLineId
-    if (!lineId) continue
+    const targetId = kind === "expense" ? r.expenseCategoryId : r.incomeLineId
+    if (!targetId) continue
 
     const norm = normalizeImportDescriptionForFewShot(r.description)
     if (!norm) continue
 
-    const lineLabel =
+    const targetLabel =
       kind === "expense"
-        ? r.expenseLineName && r.expenseCatName
-          ? `${r.expenseCatName} — ${r.expenseLineName}`
-          : (r.expenseLineName ?? lineId)
-        : (r.incomeLineName ?? lineId)
+        ? (r.expenseCategoryName ?? targetId)
+        : (r.incomeLineName ?? targetId)
 
-    const key = `${norm}|${lineId}|${kind}`
+    const targetKind = kind === "expense" ? "expense_category" : "income_line"
+    const key = `${norm}|${targetId}|${targetKind}`
     const existing = byKey.get(key)
     const snippet = r.description.trim().slice(0, 120)
     if (existing) {
@@ -98,9 +93,9 @@ export async function loadImportFewShotExamples(): Promise<ImportFewShotExample[
     } else {
       byKey.set(key, {
         count: 1,
-        line_id: lineId,
-        line_kind: kind,
-        line_label: lineLabel,
+        target_id: targetId,
+        target_kind: targetKind,
+        target_label: targetLabel,
         example_snippet: snippet,
       })
     }
@@ -111,8 +106,8 @@ export async function loadImportFewShotExamples(): Promise<ImportFewShotExample[
 
   return sorted.slice(0, limit).map((a) => ({
     description_snippet: a.example_snippet,
-    line_id: a.line_id,
-    line_kind: a.line_kind,
-    line_label: a.line_label.slice(0, 200),
+    target_id: a.target_id,
+    target_kind: a.target_kind,
+    target_label: a.target_label.slice(0, 200),
   }))
 }

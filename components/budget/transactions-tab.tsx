@@ -5,9 +5,9 @@ import { toast } from "sonner"
 
 import {
   acceptImportMatch,
-  acceptNewLineAndPost,
-  acceptSuggestedLineFromImport,
-  acceptSuggestedNewLineFromImport,
+  acceptNewCategoryAndPost,
+  acceptSuggestedCategoryFromImport,
+  acceptSuggestedMatchFromImport,
   createImportBatch,
   deleteImportBatch,
   dismissImportedTransaction,
@@ -87,12 +87,11 @@ export function ImportTransactionsPanel({
   const [filter, setFilter] = useState<FilterKey>("all")
   const [uploadLabel, setUploadLabel] = useState("")
   const [deleteId, setDeleteId] = useState<string | null>(null)
-  const [lineOverrides, setLineOverrides] = useState<Record<string, string>>({})
-  const [manualLineTxId, setManualLineTxId] = useState<string | null>(null)
-  const [manualLineName, setManualLineName] = useState("")
+  const [matchOverrides, setMatchOverrides] = useState<Record<string, string>>({})
+  const [manualCategoryTxId, setManualCategoryTxId] = useState<string | null>(null)
   const [manualCategoryId, setManualCategoryId] = useState<string>("_")
   const [manualNewCategoryName, setManualNewCategoryName] = useState("")
-  const [manualLineSubmitting, setManualLineSubmitting] = useState(false)
+  const [manualCategorySubmitting, setManualCategorySubmitting] = useState(false)
 
   const loadBatches = useCallback(() => {
     startListTransition(async () => {
@@ -206,11 +205,11 @@ export function ImportTransactionsPanel({
 
   const expenseOptions = useMemo(
     () =>
-      data.expenseLines.map((l) => ({
-        value: `e:${l.id}`,
-        label: `${l.categoryName} — ${l.name}`,
+      data.expenseCategories.map((c) => ({
+        value: `e:${c.id}`,
+        label: c.name,
       })),
-    [data.expenseLines],
+    [data.expenseCategories],
   )
 
   const incomeOptions = useMemo(
@@ -218,10 +217,10 @@ export function ImportTransactionsPanel({
     [data.incomeLines],
   )
 
-  function suggestedLineLabel(t: ImportBatchDetail["transactions"][number]): string {
-    if (t.suggestedExpenseLineId) {
-      const line = data.expenseLines.find((l) => l.id === t.suggestedExpenseLineId)
-      return line ? `${line.categoryName} — ${line.name}` : t.suggestedExpenseLineId
+  function suggestedMatchLabel(t: ImportBatchDetail["transactions"][number]): string {
+    if (t.suggestedExpenseCategoryId) {
+      const category = data.expenseCategories.find((c) => c.id === t.suggestedExpenseCategoryId)
+      return category?.name ?? t.suggestedExpenseCategoryId
     }
     if (t.suggestedIncomeLineId) {
       const line = data.incomeLines.find((l) => l.id === t.suggestedIncomeLineId)
@@ -231,17 +230,17 @@ export function ImportTransactionsPanel({
   }
 
   async function postOverride(importedId: string) {
-    const v = lineOverrides[importedId]
+    const v = matchOverrides[importedId]
     if (!v || v === "_") {
-      toast.error("Choose a budget line")
+      toast.error("Choose a category or income line")
       return
     }
-    const [kind, lineId] = v.split(":")
+    const [kind, targetId] = v.split(":")
     startListTransition(async () => {
       const r =
         kind === "e"
-          ? await acceptImportMatch({ importedTransactionId: importedId, expenseLineId: lineId })
-          : await acceptImportMatch({ importedTransactionId: importedId, incomeLineId: lineId })
+          ? await acceptImportMatch({ importedTransactionId: importedId, expenseCategoryId: targetId })
+          : await acceptImportMatch({ importedTransactionId: importedId, incomeLineId: targetId })
       if (r.ok) {
         toast.success("Posted")
         if (batchId) loadDetail(batchId)
@@ -256,20 +255,14 @@ export function ImportTransactionsPanel({
     batchActionBusy === "parse" ||
     batchActionBusy === "delete"
 
-  function openManualNewLineDialog(importedId: string) {
-    setManualLineTxId(importedId)
-    setManualLineName("")
+  function openManualCategoryDialog(importedId: string) {
+    setManualCategoryTxId(importedId)
     setManualCategoryId("_")
     setManualNewCategoryName("")
   }
 
-  async function submitManualNewLine() {
-    if (!manualLineTxId) return
-    const lineName = manualLineName.trim()
-    if (!lineName) {
-      toast.error("Enter a line name")
-      return
-    }
+  async function submitManualCategory() {
+    if (!manualCategoryTxId) return
     const newCat = manualNewCategoryName.trim()
     const catId = manualCategoryId !== "_" ? manualCategoryId : undefined
     if (!newCat && !catId) {
@@ -277,28 +270,27 @@ export function ImportTransactionsPanel({
       return
     }
 
-    setManualLineSubmitting(true)
+    setManualCategorySubmitting(true)
     try {
-      const r = await acceptNewLineAndPost({
-        importedTransactionId: manualLineTxId,
-        lineName,
+      const r = await acceptNewCategoryAndPost({
+        importedTransactionId: manualCategoryTxId,
         ...(newCat ? { categoryName: newCat } : { categoryId: catId }),
       })
       if (r.ok) {
-        toast.success("Expense line created & posted")
-        setManualLineTxId(null)
+        toast.success("Expense category posted")
+        setManualCategoryTxId(null)
         if (batchId) loadDetail(batchId)
         refreshBudget()
       } else toast.error(r.error)
     } finally {
-      setManualLineSubmitting(false)
+      setManualCategorySubmitting(false)
     }
   }
 
-  const manualLineTarget = useMemo(() => {
-    if (!manualLineTxId || !detail?.transactions) return null
-    return detail.transactions.find((t) => t.id === manualLineTxId) ?? null
-  }, [manualLineTxId, detail])
+  const manualCategoryTarget = useMemo(() => {
+    if (!manualCategoryTxId || !detail?.transactions) return null
+    return detail.transactions.find((t) => t.id === manualCategoryTxId) ?? null
+  }, [manualCategoryTxId, detail])
 
   return (
     <div className="space-y-6">
@@ -312,7 +304,8 @@ export function ImportTransactionsPanel({
               <CardTitle className="text-base">Bank & card statements</CardTitle>
               <CardDescription>
                 Upload PDF bank exports, Excel/CSV card activity, then parse and run AI matching to map
-                rows to budget lines. Text-based PDFs work best; scanned statements are not supported yet.
+                rows to expense categories or income lines. Text-based PDFs work best; scanned statements
+                are not supported yet.
               </CardDescription>
             </div>
           </div>
@@ -445,8 +438,8 @@ export function ImportTransactionsPanel({
                   [
                     ["all", "All"],
                     ["pending", "Pending"],
-                    ["suggested_line", "Suggested line"],
-                    ["needs_new_line", "New line"],
+                    ["suggested_line", "Suggested match"],
+                    ["needs_new_line", "Review"],
                     ["posted", "Posted"],
                     ["rejected", "Dismissed"],
                   ] as const
@@ -498,15 +491,12 @@ export function ImportTransactionsPanel({
                               <span className="text-muted-foreground">Posted</span>
                             ) : t.matchStatus === "suggested_line" ? (
                               <span>
-                                {t.direction === "income" ? "Income" : "Expense"}:{" "}
-                                {suggestedLineLabel(t)}
+                                {t.direction === "income" ? "Income line" : "Expense category"}:{" "}
+                                {suggestedMatchLabel(t)}
                               </span>
                             ) : t.matchStatus === "needs_new_line" ? (
                               <span className="text-amber-700 dark:text-amber-400">
-                                New:{" "}
-                                {t.suggestedCategoryName ||
-                                  (t.suggestedUseExistingCategoryId ? "Existing category" : "?")}{" "}
-                                › {t.suggestedLineName}
+                                Review: {t.suggestedCategoryName || "Choose category manually"}
                               </span>
                             ) : t.matchStatus === "rejected" ? (
                               <span className="text-muted-foreground">Dismissed</span>
@@ -529,9 +519,9 @@ export function ImportTransactionsPanel({
                                   variant="outline"
                                   className="w-full sm:w-auto"
                                   disabled={tableActionsLocked}
-                                  onClick={() => openManualNewLineDialog(t.id)}
+                                  onClick={() => openManualCategoryDialog(t.id)}
                                 >
-                                  New line…
+                                  Post to category…
                                 </Button>
                                 {t.matchStatus === "suggested_line" && (
                                   <Button
@@ -541,7 +531,7 @@ export function ImportTransactionsPanel({
                                     disabled={tableActionsLocked}
                                     onClick={() =>
                                       startListTransition(async () => {
-                                        const r = await acceptSuggestedLineFromImport(t.id)
+                                        const r = await acceptSuggestedMatchFromImport(t.id)
                                         if (r.ok) {
                                           toast.success("Posted")
                                           if (batchId) loadDetail(batchId)
@@ -562,30 +552,30 @@ export function ImportTransactionsPanel({
                                     disabled={tableActionsLocked}
                                     onClick={() =>
                                       startListTransition(async () => {
-                                        const r = await acceptSuggestedNewLineFromImport(t.id)
+                                        const r = await acceptSuggestedCategoryFromImport(t.id)
                                         if (r.ok) {
-                                          toast.success("Line added & posted")
+                                          toast.success("Category posted")
                                           if (batchId) loadDetail(batchId)
                                           refreshBudget()
                                         } else toast.error(r.error)
                                       })
                                     }
                                   >
-                                    Add line & post
+                                    Post suggested category
                                   </Button>
                                 )}
                                 <div className="flex flex-wrap items-center gap-1">
                                   <Select
-                                    value={lineOverrides[t.id] ?? "_"}
+                                    value={matchOverrides[t.id] ?? "_"}
                                     onValueChange={(v) =>
-                                      setLineOverrides((o) => ({ ...o, [t.id]: v }))
+                                      setMatchOverrides((o) => ({ ...o, [t.id]: v }))
                                     }
                                   >
                                     <SelectTrigger className="h-8 w-[180px]">
-                                      <SelectValue placeholder="Pick line…" />
+                                      <SelectValue placeholder="Pick match…" />
                                     </SelectTrigger>
                                     <SelectContent>
-                                      <SelectItem value="_">Pick line…</SelectItem>
+                                      <SelectItem value="_">Pick match…</SelectItem>
                                       {expenseOptions.map((o) => (
                                         <SelectItem key={o.value} value={o.value}>
                                           {o.label}
@@ -641,40 +631,30 @@ export function ImportTransactionsPanel({
       </Card>
 
       <Dialog
-        open={manualLineTxId != null}
+        open={manualCategoryTxId != null}
         onOpenChange={(open) => {
-          if (!open && !manualLineSubmitting) setManualLineTxId(null)
+          if (!open && !manualCategorySubmitting) setManualCategoryTxId(null)
         }}
       >
-        <DialogContent className="sm:max-w-md" showCloseButton={!manualLineSubmitting}>
+        <DialogContent className="sm:max-w-md" showCloseButton={!manualCategorySubmitting}>
           <DialogHeader>
-            <DialogTitle>Create expense line & post</DialogTitle>
+            <DialogTitle>Post to expense category</DialogTitle>
             <DialogDescription>
-              Adds a new expense line under an existing or new category, then posts this import row to it.
-              {manualLineTarget ? (
+              Assign this import row to an existing or new expense category.
+              {manualCategoryTarget ? (
                 <span className="text-foreground mt-2 block truncate font-normal">
-                  {manualLineTarget.description}
+                  {manualCategoryTarget.description}
                 </span>
               ) : null}
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-3 py-1">
             <div className="space-y-2">
-              <Label htmlFor="manual-line-name">Line name</Label>
-              <Input
-                id="manual-line-name"
-                value={manualLineName}
-                onChange={(e) => setManualLineName(e.target.value)}
-                placeholder="e.g. Pharmacy"
-                disabled={manualLineSubmitting || tableActionsLocked}
-              />
-            </div>
-            <div className="space-y-2">
               <Label>Category</Label>
               <Select
                 value={manualCategoryId}
                 onValueChange={setManualCategoryId}
-                disabled={manualLineSubmitting || tableActionsLocked}
+                disabled={manualCategorySubmitting || tableActionsLocked}
               >
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="Existing category…" />
@@ -696,7 +676,7 @@ export function ImportTransactionsPanel({
                 value={manualNewCategoryName}
                 onChange={(e) => setManualNewCategoryName(e.target.value)}
                 placeholder="Optional — creates a category if set"
-                disabled={manualLineSubmitting || tableActionsLocked}
+                disabled={manualCategorySubmitting || tableActionsLocked}
               />
               <p className="text-muted-foreground text-xs">
                 If you fill this, it is used instead of the category picker.
@@ -707,21 +687,21 @@ export function ImportTransactionsPanel({
             <Button
               type="button"
               variant="outline"
-              disabled={manualLineSubmitting}
-              onClick={() => setManualLineTxId(null)}
+              disabled={manualCategorySubmitting}
+              onClick={() => setManualCategoryTxId(null)}
             >
               Cancel
             </Button>
             <Button
               type="button"
               className="gap-2"
-              disabled={manualLineSubmitting || tableActionsLocked}
-              onClick={() => void submitManualNewLine()}
+              disabled={manualCategorySubmitting || tableActionsLocked}
+              onClick={() => void submitManualCategory()}
             >
-              {manualLineSubmitting ? (
+              {manualCategorySubmitting ? (
                 <Loader2 className="size-4 animate-spin" aria-hidden />
               ) : null}
-              Create & post
+              Post expense
             </Button>
           </DialogFooter>
         </DialogContent>

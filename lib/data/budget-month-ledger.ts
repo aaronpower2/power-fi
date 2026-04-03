@@ -35,6 +35,7 @@ export async function syncLedgerFromImportedTransaction(
     direction: row.direction,
     source: "import" as const,
     importedTransactionId: row.id,
+    suggestedExpenseCategoryId: row.suggestedExpenseCategoryId,
     suggestedExpenseLineId: row.suggestedExpenseLineId,
     suggestedIncomeLineId: row.suggestedIncomeLineId,
     postedExpenseRecordId: postedExpense,

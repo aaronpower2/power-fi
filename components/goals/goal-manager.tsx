@@ -2,7 +2,7 @@
 
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useRouter } from "next/navigation"
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { type Control, useFieldArray, useForm, useWatch } from "react-hook-form"
 import { toast } from "sonner"
 
@@ -13,7 +13,9 @@ import {
   updateGoal,
 } from "@/lib/actions/goal"
 import { SUPPORTED_CURRENCIES } from "@/lib/currency/iso4217"
+import type { BudgetCategoryPlannedForGoalCopy } from "@/lib/data/budget-categories-for-goal"
 import type { GoalWithLifestyle } from "@/lib/data/goals"
+import { convertAmount } from "@/lib/currency/convert"
 import { formatGoalDisplayName } from "@/lib/goals/labels"
 import { formatCurrency } from "@/lib/format"
 import {
@@ -35,6 +37,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -69,8 +72,232 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { CheckCircle2, MoreHorizontal, Plus, Trash2 } from "lucide-react"
+import { CheckCircle2, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react"
+
+type BudgetCategoriesForLifestyleCopyPayload = {
+  categories: BudgetCategoryPlannedForGoalCopy[]
+  fxRatesFromBase: Record<string, number> | null
+  fxAsOfDate: string | null
+}
+
+type CopyRow = BudgetCategoryPlannedForGoalCopy & {
+  amountInGoal: number | null
+  selectable: boolean
+  reasonDisabled: string | null
+}
+
+function CopyBudgetCategoriesIntoLifestyle({
+  categories,
+  fxRatesFromBase,
+  fxAsOfDate,
+  goalCurrency,
+  onAppendLines,
+}: {
+  categories: BudgetCategoryPlannedForGoalCopy[]
+  fxRatesFromBase: Record<string, number> | null
+  fxAsOfDate: string | null
+  goalCurrency: string
+  onAppendLines: (lines: { name: string; monthlyAmount: number }[]) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [selected, setSelected] = useState<Set<string>>(() => new Set())
+
+  const rateMap = useMemo(
+    () => (fxRatesFromBase ? new Map(Object.entries(fxRatesFromBase)) : null),
+    [fxRatesFromBase],
+  )
+
+  const rows: CopyRow[] = useMemo(() => {
+    const g = goalCurrency.trim().toUpperCase()
+    return categories.map((c) => {
+      const native = c.monthlyAmountNative
+      const from = c.nativeCurrency.trim().toUpperCase()
+      let amountInGoal: number | null = native
+      let reasonDisabled: string | null = null
+
+      if (native <= 0) {
+        reasonDisabled = "No recurring budget on this category"
+      } else if (from !== g) {
+        if (!rateMap) {
+          amountInGoal = null
+          reasonDisabled = "FX rates unavailable — cannot convert to goal currency"
+        } else {
+          const conv = convertAmount(native, from, g, rateMap)
+          if (conv == null || !Number.isFinite(conv)) {
+            amountInGoal = null
+            reasonDisabled = `Could not convert ${from} to ${g}`
+          } else {
+            amountInGoal = Math.round(conv * 100) / 100
+          }
+        }
+      } else {
+        amountInGoal = Math.round(native * 100) / 100
+      }
+
+      if (reasonDisabled == null && native > 0 && amountInGoal != null && amountInGoal < 0.01) {
+        reasonDisabled = "Planned amount below 0.01 in goal currency"
+      }
+
+      const selectable = reasonDisabled == null && amountInGoal != null && amountInGoal >= 0.01
+
+      return {
+        ...c,
+        amountInGoal,
+        selectable,
+        reasonDisabled: selectable ? null : reasonDisabled,
+      }
+    })
+  }, [categories, goalCurrency, rateMap])
+
+  const selectableIds = useMemo(() => rows.filter((r) => r.selectable).map((r) => r.id), [rows])
+  const needsFx = useMemo(
+    () =>
+      categories.some(
+        (c) =>
+          c.monthlyAmountNative > 0 &&
+          c.nativeCurrency.trim().toUpperCase() !== goalCurrency.trim().toUpperCase(),
+      ),
+    [categories, goalCurrency],
+  )
+
+  function toggleId(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function selectAllSelectable() {
+    setSelected(new Set(selectableIds))
+  }
+
+  function clearSelection() {
+    setSelected(new Set())
+  }
+
+  function handleOpenChange(next: boolean) {
+    setOpen(next)
+    if (!next) setSelected(new Set())
+  }
+
+  function apply() {
+    const toAdd = rows
+      .filter((r) => r.selectable && selected.has(r.id))
+      .map((r) => ({
+        name: r.name,
+        monthlyAmount: r.amountInGoal!,
+      }))
+    if (toAdd.length === 0) return
+    onAppendLines(toAdd)
+    setOpen(false)
+    setSelected(new Set())
+  }
+
+  const selectedCount = rows.filter((r) => r.selectable && selected.has(r.id)).length
+
+  return (
+    <Popover open={open} onOpenChange={handleOpenChange}>
+      <PopoverTrigger asChild>
+        <Button type="button" variant="outline" size="sm" className="gap-1">
+          <Plus className="size-4" />
+          Copy from budget categories
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        className="flex w-[min(100vw-2rem,42rem)] max-w-none flex-col gap-0 overflow-hidden p-0"
+        align="start"
+        sideOffset={8}
+      >
+        <div className="border-border shrink-0 border-b px-4 py-3">
+          <p className="text-sm font-semibold">Copy budget into lifestyle</p>
+          <p className="text-muted-foreground mt-1 text-xs leading-relaxed">
+            Uses each category&apos;s smoothed monthly plan (same as Budget). New lines are appended; edit or remove
+            afterward. Goal currency: <span className="text-foreground font-medium">{goalCurrency}</span>
+            {fxAsOfDate ? (
+              <span className="mt-1 block">FX as of {fxAsOfDate} when converting.</span>
+            ) : needsFx ? (
+              <span className="text-destructive mt-1 block">
+                No FX snapshot — run <code className="text-xs">pnpm fx:sync</code> to convert other currencies.
+              </span>
+            ) : null}
+          </p>
+        </div>
+        <div className="max-h-[min(20rem,50vh)] overflow-y-auto px-4 py-2">
+          {categories.length === 0 ? (
+            <p className="text-muted-foreground text-sm">
+              No expense categories yet. Add them under Budget, then set recurring plans on categories you want here.
+            </p>
+          ) : selectableIds.length === 0 ? (
+            <p className="text-muted-foreground text-sm">
+              No categories have a convertible monthly plan for {goalCurrency}. Set recurring category budgets under
+              Budget first.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex flex-wrap gap-2">
+                <Button type="button" variant="ghost" size="sm" className="h-8 px-2 text-xs" onClick={selectAllSelectable}>
+                  Select all with budget
+                </Button>
+                <Button type="button" variant="ghost" size="sm" className="h-8 px-2 text-xs" onClick={clearSelection}>
+                  Clear
+                </Button>
+              </div>
+              <div className="space-y-0.5">
+                <div className="text-muted-foreground grid grid-cols-[auto_minmax(0,1fr)_auto] gap-x-3 text-xs font-medium">
+                  <span className="sr-only">Include</span>
+                  <span>Category</span>
+                  <span className="whitespace-nowrap text-end">/ mo ({goalCurrency})</span>
+                </div>
+                <ul className="divide-border divide-y">
+                  {rows.map((r) => (
+                    <li
+                      key={r.id}
+                      className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1 py-2.5"
+                    >
+                      <input
+                        type="checkbox"
+                        className="mt-1 size-4 shrink-0 accent-primary"
+                        checked={selected.has(r.id)}
+                        disabled={!r.selectable}
+                        onChange={() => toggleId(r.id)}
+                        aria-label={`Include ${r.name}`}
+                      />
+                      <div className="min-w-0 space-y-0.5">
+                        <p className="text-sm leading-snug font-medium wrap-break-word">{r.name}</p>
+                        {!r.selectable && r.reasonDisabled ? (
+                          <p className="text-muted-foreground text-xs leading-snug wrap-break-word">
+                            {r.reasonDisabled}
+                          </p>
+                        ) : r.nativeCurrency.trim().toUpperCase() !== goalCurrency.trim().toUpperCase() ? (
+                          <p className="text-muted-foreground text-xs leading-snug wrap-break-word tabular-nums">
+                            {formatCurrency(r.monthlyAmountNative, r.nativeCurrency)} planned
+                          </p>
+                        ) : null}
+                      </div>
+                      <p className="text-foreground shrink-0 self-center text-end text-sm whitespace-nowrap tabular-nums">
+                        {r.amountInGoal != null ? formatCurrency(r.amountInGoal, goalCurrency) : "—"}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-2 border-t px-4 py-3">
+          <Button type="button" variant="outline" size="sm" onClick={() => handleOpenChange(false)}>
+            Close
+          </Button>
+          <Button type="button" size="sm" disabled={selectedCount === 0} onClick={apply}>
+            Add {selectedCount || "…"} {selectedCount === 1 ? "line" : "lines"}
+          </Button>
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
 
 type GoalRow = typeof goals.$inferSelect
 
@@ -82,9 +309,11 @@ type GoalLifestyleFormValues = {
 function LifestyleLinesFields({
   control,
   currencyCode,
+  budgetCategoriesForLifestyleCopy,
 }: {
   control: Control<GoalLifestyleFormValues>
   currencyCode: string
+  budgetCategoriesForLifestyleCopy: BudgetCategoriesForLifestyleCopyPayload
 }) {
   const { fields, append, remove } = useFieldArray<GoalLifestyleFormValues, "lifestyleLines">({
     control,
@@ -165,173 +394,178 @@ function LifestyleLinesFields({
           </div>
         ))}
       </div>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="gap-1"
-        onClick={() => append({ name: "", monthlyAmount: 1 })}
-      >
-        <Plus className="size-4" />
-        Add line
-      </Button>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="gap-1"
+          onClick={() => append({ name: "", monthlyAmount: 1 })}
+        >
+          <Plus className="size-4" />
+          Add line
+        </Button>
+        <CopyBudgetCategoriesIntoLifestyle
+          categories={budgetCategoriesForLifestyleCopy.categories}
+          fxRatesFromBase={budgetCategoriesForLifestyleCopy.fxRatesFromBase}
+          fxAsOfDate={budgetCategoriesForLifestyleCopy.fxAsOfDate}
+          goalCurrency={currencyCode}
+          onAppendLines={(lines) => {
+            for (const line of lines) {
+              append(line)
+            }
+          }}
+        />
+      </div>
     </div>
   )
 }
 
-export function GoalManager({ items }: { items: GoalWithLifestyle[] }) {
+export function GoalManager({
+  items,
+  budgetCategoriesForLifestyleCopy,
+}: {
+  items: GoalWithLifestyle[]
+  budgetCategoriesForLifestyleCopy: BudgetCategoriesForLifestyleCopyPayload
+}) {
   const router = useRouter()
   const [pendingDelete, setPendingDelete] = useState<string | null>(null)
-  const [activeTab, setActiveTab] = useState("active")
   const [createDialogOpen, setCreateDialogOpen] = useState(false)
-  const active = items.find((i) => i.goal.isActive)
-  const inactive = items.filter((i) => !i.goal.isActive)
+  const [editing, setEditing] = useState<GoalWithLifestyle | null>(null)
 
   const refresh = () => router.refresh()
 
   return (
     <div className="space-y-8">
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex w-full flex-col gap-8">
-        <PageHeader
-          title="Goal"
-          description="Define your FI date, safe withdrawal rate, and lifestyle lines (expected monthly costs). Their sum is goal monthly funding and drives the independence target."
-          controls={
-            <div className="flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <TabsList>
-                <TabsTrigger value="active">Active goal</TabsTrigger>
-                <TabsTrigger value="other">Other goals</TabsTrigger>
-              </TabsList>
-              <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-                <Button
-                  size="sm"
-                  className="gap-1.5"
-                  onClick={() => setCreateDialogOpen(true)}
-                >
-                  <Plus className="size-4 shrink-0" aria-hidden />
-                  New goal
-                </Button>
-              </div>
-            </div>
-          }
-        />
+      <PageHeader
+        title="Goals"
+        description="FI date, withdrawal rate, and lifestyle lines set monthly funding. One active goal drives FI summary — use Edit on any row to change details, or Set active to switch."
+        controls={
+          <Button size="sm" className="gap-1.5" onClick={() => setCreateDialogOpen(true)}>
+            <Plus className="size-4 shrink-0" aria-hidden />
+            New goal
+          </Button>
+        }
+      />
 
-        <Card>
-          <CardHeader>
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div className="min-w-0 flex-1">
-                <CardHeaderTitleRow
-                  title={
-                    <CardTitle>
-                      {active ? formatGoalDisplayName(active.goal) : "Independence target"}
-                    </CardTitle>
-                  }
-                  info={
-                    <>
-                      One active goal drives projections. Withdrawal rate is stored as a decimal; you enter percent
-                      in the form. Required portfolio on the summary uses: (sum of lifestyle lines × 12) ÷ withdrawal
-                      rate.
-                    </>
-                  }
-                />
-              </div>
-              {active ? (
-                <Button type="submit" form="goal-active-form" size="sm" className="shrink-0">
-                  Save
-                </Button>
-              ) : null}
-            </div>
-          </CardHeader>
-          <CardContent>
-            <TabsContent value="active" className="mt-0 outline-none">
-              {active ? (
-                <ActiveGoalForm
-                  goal={active.goal}
-                  lifestyleLines={active.lifestyleLines}
-                  onSuccess={refresh}
-                />
-              ) : (
-                <div className="text-muted-foreground flex items-center gap-1.5 text-sm">
-                  <span>No active goal</span>
-                  <InfoTooltip>
-                    Create one with New goal, or activate an existing goal under Other goals.
-                  </InfoTooltip>
-                </div>
-              )}
-            </TabsContent>
+      <Card>
+        <CardHeader>
+          <CardHeaderTitleRow
+            title={<CardTitle>Goals</CardTitle>}
+            info={
+              <>
+                The goal marked <span className="text-foreground font-medium">Active</span> is used for FI summary and
+                projections. Required portfolio uses: (sum of lifestyle lines × 12) ÷ withdrawal rate. Withdrawal rate
+                is stored as a decimal; you enter percent when editing.
+              </>
+            }
+          />
+        </CardHeader>
+        <CardContent>
+          {items.length > 0 ? (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>FI date</TableHead>
+                  <TableHead>Monthly need</TableHead>
+                  <TableHead className="w-28">Status</TableHead>
+                  <TableHead className="w-12" />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {items.map(({ goal: g }) => (
+                  <TableRow key={g.id}>
+                    <TableCell className="max-w-48 min-w-0 font-medium wrap-break-word">
+                      {formatGoalDisplayName(g)}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap font-mono text-xs">{g.fiDate}</TableCell>
+                    <TableCell className="whitespace-nowrap tabular-nums">
+                      {formatCurrency(Number(g.monthlyFundingRequirement), g.currency ?? "USD")}
+                    </TableCell>
+                    <TableCell>
+                      {g.isActive ? (
+                        <span className="bg-primary/15 text-primary inline-flex rounded-full px-2 py-0.5 text-xs font-medium">
+                          Active
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground text-xs">—</span>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="icon-sm" aria-label="Actions">
+                            <MoreHorizontal />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem
+                            onClick={() => {
+                              const row = items.find((i) => i.goal.id === g.id)
+                              if (row) setEditing(row)
+                            }}
+                          >
+                            <Pencil className="size-4 opacity-70" />
+                            Edit
+                          </DropdownMenuItem>
+                          {!g.isActive ? (
+                            <DropdownMenuItem
+                              onClick={async () => {
+                                const r = await setActiveGoal(g.id)
+                                if (r.ok) {
+                                  toast.success("Goal activated")
+                                  refresh()
+                                } else toast.error(r.error)
+                              }}
+                            >
+                              <CheckCircle2 className="size-4 opacity-70" />
+                              Set active
+                            </DropdownMenuItem>
+                          ) : null}
+                          <DropdownMenuItem
+                            variant="destructive"
+                            onSelect={(e) => {
+                              e.preventDefault()
+                              setPendingDelete(g.id)
+                            }}
+                          >
+                            <Trash2 className="size-4 opacity-70" />
+                            Delete
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          ) : (
+            <p className="text-muted-foreground text-sm">
+              No goals yet. Create one with <span className="text-foreground font-medium">New goal</span>.
+            </p>
+          )}
+        </CardContent>
+      </Card>
 
-            <TabsContent value="other" className="mt-0 outline-none">
-              {inactive.length > 0 ? (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Name</TableHead>
-                      <TableHead>FI date</TableHead>
-                      <TableHead>Monthly need</TableHead>
-                      <TableHead className="w-12" />
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {inactive.map(({ goal: g }) => (
-                      <TableRow key={g.id}>
-                        <TableCell className="max-w-[12rem] truncate font-medium">
-                          {formatGoalDisplayName(g)}
-                        </TableCell>
-                        <TableCell className="font-mono text-xs">{g.fiDate}</TableCell>
-                        <TableCell>
-                          {formatCurrency(
-                            Number(g.monthlyFundingRequirement),
-                            g.currency ?? "USD",
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button variant="ghost" size="icon-sm" aria-label="Actions">
-                                <MoreHorizontal />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end">
-                              <DropdownMenuItem
-                                onClick={async () => {
-                                  const r = await setActiveGoal(g.id)
-                                  if (r.ok) {
-                                    toast.success("Goal activated")
-                                    refresh()
-                                  } else toast.error(r.error)
-                                }}
-                              >
-                                <CheckCircle2 className="size-4 opacity-70" />
-                                Set active
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                variant="destructive"
-                                onSelect={(e) => {
-                                  e.preventDefault()
-                                  setPendingDelete(g.id)
-                                }}
-                              >
-                                <Trash2 className="size-4 opacity-70" />
-                                Delete
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              ) : (
-                <p className="text-muted-foreground text-sm">None</p>
-              )}
-            </TabsContent>
-          </CardContent>
-        </Card>
-      </Tabs>
+      <EditGoalDialog
+        item={editing}
+        open={editing != null}
+        onOpenChange={(o) => {
+          if (!o) setEditing(null)
+        }}
+        budgetCategoriesForLifestyleCopy={budgetCategoriesForLifestyleCopy}
+        onSaved={() => {
+          setEditing(null)
+          refresh()
+        }}
+      />
 
       <CreateGoalDialog
         open={createDialogOpen}
         onOpenChange={setCreateDialogOpen}
         onCreated={refresh}
+        budgetCategoriesForLifestyleCopy={budgetCategoriesForLifestyleCopy}
       />
 
       <AlertDialog
@@ -381,14 +615,18 @@ function defaultLifestyleLines(
   return [{ name: "Lifestyle", monthlyAmount: Number(goal.monthlyFundingRequirement) }]
 }
 
-function ActiveGoalForm({
+function GoalEditForm({
   goal,
   lifestyleLines,
+  budgetCategoriesForLifestyleCopy,
   onSuccess,
+  formId,
 }: {
   goal: GoalRow
   lifestyleLines: GoalWithLifestyle["lifestyleLines"]
+  budgetCategoriesForLifestyleCopy: BudgetCategoriesForLifestyleCopyPayload
   onSuccess: () => void
+  formId: string
 }) {
   const form = useForm<UpdateGoalInput>({
     resolver: zodResolver(updateGoalSchema),
@@ -413,7 +651,7 @@ function ActiveGoalForm({
 
   return (
     <Form {...form}>
-      <form id="goal-active-form" onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+      <form id={formId} onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
         <FormField
           control={form.control}
           name="name"
@@ -489,9 +727,58 @@ function ActiveGoalForm({
         <LifestyleLinesFields
           control={form.control as unknown as Control<GoalLifestyleFormValues>}
           currencyCode={goalCurrency}
+          budgetCategoriesForLifestyleCopy={budgetCategoriesForLifestyleCopy}
         />
       </form>
     </Form>
+  )
+}
+
+function EditGoalDialog({
+  item,
+  open,
+  onOpenChange,
+  budgetCategoriesForLifestyleCopy,
+  onSaved,
+}: {
+  item: GoalWithLifestyle | null
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  budgetCategoriesForLifestyleCopy: BudgetCategoriesForLifestyleCopyPayload
+  onSaved: () => void
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        fullViewport
+        className="inset-4 max-h-[calc(100dvh-2rem)] sm:inset-6 sm:max-h-[calc(100dvh-3rem)]"
+      >
+        <DialogHeader className="border-border flex shrink-0 flex-row flex-wrap items-center justify-between gap-2 space-y-0 border-b px-6 py-4 pr-14">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            <DialogTitle>Edit goal</DialogTitle>
+            <InfoTooltip>
+              Updates this plan only. The row marked <span className="text-foreground font-medium">Active</span> in
+              the table is what FI summary uses.
+            </InfoTooltip>
+          </div>
+          <Button type="submit" form="goal-edit-form" size="sm" className="shrink-0">
+            Save
+          </Button>
+        </DialogHeader>
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+          {item ? (
+            <GoalEditForm
+              key={item.goal.id}
+              goal={item.goal}
+              lifestyleLines={item.lifestyleLines}
+              formId="goal-edit-form"
+              budgetCategoriesForLifestyleCopy={budgetCategoriesForLifestyleCopy}
+              onSuccess={onSaved}
+            />
+          ) : null}
+        </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -499,10 +786,12 @@ function CreateGoalDialog({
   open,
   onOpenChange,
   onCreated,
+  budgetCategoriesForLifestyleCopy,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   onCreated: () => void
+  budgetCategoriesForLifestyleCopy: BudgetCategoriesForLifestyleCopyPayload
 }) {
   const [makeActive, setMakeActive] = useState(true)
 
@@ -632,6 +921,7 @@ function CreateGoalDialog({
             <LifestyleLinesFields
               control={form.control as unknown as Control<GoalLifestyleFormValues>}
               currencyCode={createCurrency}
+              budgetCategoriesForLifestyleCopy={budgetCategoriesForLifestyleCopy}
             />
             <label className="flex items-center gap-2 text-sm">
               <input

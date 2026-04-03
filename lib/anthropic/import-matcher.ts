@@ -9,20 +9,27 @@ const matchRowSchema = z
     kind: z.enum(["expense", "income"]),
     existing_line_id: z.string().uuid().nullable().optional(),
     propose_category_name: z.string().max(256).nullable().optional(),
-    propose_line_name: z.string().max(256).nullable().optional(),
     existing_category_id: z.string().uuid().nullable().optional(),
     confidence: z.enum(["high", "medium", "low"]),
     notes: z.string().max(500).nullable().optional(),
   })
   .superRefine((d, ctx) => {
     const hasLine = d.existing_line_id != null && d.existing_line_id.length > 0
-    const hasNew =
-      d.propose_line_name != null &&
-      String(d.propose_line_name).trim().length > 0
-    if (!hasLine && !hasNew) {
+    const hasCategory =
+      d.existing_category_id != null && d.existing_category_id.length > 0
+    const hasNewCategory =
+      d.propose_category_name != null &&
+      String(d.propose_category_name).trim().length > 0
+    if (d.kind === "income" && !hasLine) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Provide existing_line_id or propose_line_name",
+        message: "Income matches require existing_line_id",
+      })
+    }
+    if (d.kind === "expense" && !hasCategory && !hasNewCategory) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Expense matches require existing_category_id or propose_category_name",
       })
     }
   })
@@ -40,9 +47,8 @@ export type StagingRowForModel = {
 }
 
 export type BudgetLinesForModel = {
-  expense_lines: { id: string; name: string; category_id: string; category_name: string }[]
+  expense_categories: { id: string; name: string; example_line_names: string[] }[]
   income_lines: { id: string; name: string }[]
-  expense_categories: { id: string; name: string }[]
 }
 
 function extractJsonArray(text: string): unknown {
@@ -67,13 +73,13 @@ function buildPrompt(
       ? `
 
 ## Past mappings (this household)
-When a new transaction resembles these past statement descriptions, prefer the same **existing_line_id** UUID (must appear in the lists below). Patterns are from prior accepted posts, not exhaustive.
+When a new transaction resembles these past statement descriptions, prefer the same existing id from the lists below. expense_category rows map to existing_category_id. income_line rows map to existing_line_id. Patterns are from prior accepted posts, not exhaustive.
 ${JSON.stringify(
           fewShots.map((f) => ({
             description_snippet: f.description_snippet,
-            line_id: f.line_id,
-            line_kind: f.line_kind,
-            line_label: f.line_label,
+            target_id: f.target_id,
+            target_kind: f.target_kind,
+            target_label: f.target_label,
           })),
         )}
 `
@@ -82,30 +88,28 @@ ${JSON.stringify(
   return `You are categorizing personal finance transactions for a budget app.
 
 Rules:
-- **Budget caps are at the expense category level** (e.g. Education, Food). **Expense lines** are for detailed classification of card/bank transactions — map to the best-fitting line, not a separate budget per merchant.
-- **Strongly prefer existing lines.** For almost every transaction you should set existing_line_id to a UUID from the lists below. Merchant/description text is a *hint for theme*, not a requirement that the line name match the merchant (e.g. "NETFLIX", "SPOTIFY", "APPLE.COM/BILL" → an existing line like "Entertainment and Subscriptions" or "Streaming" if one exists — do NOT propose a new "Netflix" line when a broader existing line fits).
-- **Map broadly.** If multiple existing lines could work, choose the **most general reasonable** one that still reflects the kind of spend (groceries, transport, utilities, dining, subscriptions, shopping, healthcare, etc.). Only use propose_line_name when **no** existing line is a plausible bucket for this transaction.
-- **Rare new lines.** propose_line_name / new categories are for genuinely uncategorized spend that does not fit any existing line even loosely. Do not create merchant-specific lines when a thematic line already exists.
-- kind is "expense" for spending, fees, card purchases, and card refunds/credits (map refunds to the same thematic expense line or a generic "Shopping"/returns-style line if you have one — do NOT use income unless it is clearly salary, interest earned, or a labeled income deposit).
+- **Budget caps are at the expense category level.** For expense transactions, prefer an existing **expense category** UUID from the list below.
+- **Map expenses broadly.** Merchant/description text is a hint for theme, not a requirement that the category name match the merchant. Example: "NETFLIX", "SPOTIFY", "APPLE.COM/BILL" should usually map to a broad existing category like entertainment/subscriptions, not a merchant-specific bucket.
+- **Reuse existing categories whenever plausible.** Only use propose_category_name when no existing expense category is a reasonable home for the transaction.
+- **Income remains line-based.** For income transactions, set existing_line_id to a UUID from the income line list below.
+- kind is "expense" for spending, fees, card purchases, and card refunds/credits (map refunds to the same thematic expense category — do NOT use income unless it is clearly salary, interest earned, or a labeled income deposit).
 - kind is "income" only for salary, freelance payment, interest, dividends, or clear deposits that are income.
-- If using an existing line, set existing_line_id to that UUID exactly from the lists below.
-- If you truly cannot fit any existing line, set propose_line_name (and optionally propose_category_name or existing_category_id). Prefer existing_category_id + propose_line_name only when the category exists but no line fits.
+- For expense transactions, set existing_category_id to a UUID exactly from the expense category list below when possible.
+- For income transactions, set existing_line_id to a UUID exactly from the income line list below.
+- If you truly cannot fit an expense into any existing category, set propose_category_name to a short broad label for manual review. Do not invent merchant-specific categories unless absolutely necessary.
 - confidence: high | medium | low
 ${fewShotBlock}
-Expense lines (id, name, category):
-${JSON.stringify(lines.expense_lines)}
+Expense categories (id, name, example line labels):
+${JSON.stringify(lines.expense_categories)}
 
 Income lines (id, name):
 ${JSON.stringify(lines.income_lines)}
-
-Expense categories (id, name):
-${JSON.stringify(lines.expense_categories)}
 
 Transactions to classify (staging_id is stable — echo each staging_id exactly once in your output):
 ${JSON.stringify(staging)}
 
 Return ONLY a JSON array (no markdown outside the array). Keep notes null or a very short string. Each element:
-{"staging_id":"uuid","kind":"expense"|"income","existing_line_id":null|string,"propose_category_name":null|string,"propose_line_name":null|string,"existing_category_id":null|string,"confidence":"high"|"medium"|"low","notes":null|string}`
+{"staging_id":"uuid","kind":"expense"|"income","existing_line_id":null|string,"propose_category_name":null|string,"existing_category_id":null|string,"confidence":"high"|"medium"|"low","notes":null|string}`
 }
 
 function sleep(ms: number): Promise<void> {

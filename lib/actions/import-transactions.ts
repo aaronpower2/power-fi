@@ -85,6 +85,10 @@ function extKind(name: string): { parser: ParserKind; mime: string } {
   return { parser: "unknown", mime: "application/octet-stream" }
 }
 
+function normalizedPostedRecordAmount(amount: string | number): string {
+  return Math.abs(Number(amount)).toFixed(2)
+}
+
 export async function createImportBatch(formData: FormData): Promise<
   ActionResult<{ batchId: string }>
 > {
@@ -149,29 +153,30 @@ async function loadBudgetLineCatalog(db: NonNullable<ReturnType<typeof getDb>>) 
     .orderBy(asc(expenseCategories.sortOrder), asc(expenseCategories.name))
   const expLines = await db
     .select({
-      id: expenseLines.id,
       name: expenseLines.name,
       categoryId: expenseLines.categoryId,
-      categoryName: expenseCategories.name,
     })
     .from(expenseLines)
-    .innerJoin(expenseCategories, eq(expenseLines.categoryId, expenseCategories.id))
-    .orderBy(asc(expenseCategories.sortOrder), asc(expenseLines.name))
+    .orderBy(asc(expenseLines.name))
   const incLines = await db
     .select()
     .from(incomeLines)
     .orderBy(asc(incomeLines.sortOrder), asc(incomeLines.name))
 
+  const exampleLineNamesByCategory = new Map<string, string[]>()
+  for (const line of expLines) {
+    const arr = exampleLineNamesByCategory.get(line.categoryId) ?? []
+    if (arr.length < 6) arr.push(line.name)
+    exampleLineNamesByCategory.set(line.categoryId, arr)
+  }
+
   return {
-    expense_lines: expLines.map((l) => ({
-      id: l.id,
-      name: l.name,
-      category_id: l.categoryId,
-      category_name: l.categoryName,
+    expense_categories: cats.map((c) => ({
+      id: c.id,
+      name: c.name,
+      example_line_names: exampleLineNamesByCategory.get(c.id) ?? [],
     })),
     income_lines: incLines.map((l) => ({ id: l.id, name: l.name })),
-    expense_categories: cats.map((c) => ({ id: c.id, name: c.name })),
-    expenseLineIdSet: new Set(expLines.map((l) => l.id)),
     incomeLineIdSet: new Set(incLines.map((l) => l.id)),
     categoryIdSet: new Set(cats.map((c) => c.id)),
   }
@@ -338,35 +343,28 @@ export async function runAnthropicMatch(batchId: string): Promise<ActionResult> 
         if (!m) continue
 
         const direction = m.kind
+        let suggestedExpenseCategoryId: string | null = null
         let suggestedExpenseLineId: string | null = null
         let suggestedIncomeLineId: string | null = null
         let suggestedCategoryName: string | null = null
-        let suggestedLineName: string | null = null
-        let suggestedUseExistingCategoryId: string | null = null
         let matchStatus: string = "pending"
         const conf = m.confidence
         const notes = m.notes ?? null
 
+        const categoryId = m.existing_category_id?.trim() || null
         const lineId = m.existing_line_id?.trim() || null
-        if (lineId) {
-          if (m.kind === "expense" && catalog.expenseLineIdSet.has(lineId)) {
-            suggestedExpenseLineId = lineId
-            matchStatus = "suggested_line"
-          } else if (m.kind === "income" && catalog.incomeLineIdSet.has(lineId)) {
-            suggestedIncomeLineId = lineId
-            matchStatus = "suggested_line"
-          }
+        if (m.kind === "expense" && categoryId && catalog.categoryIdSet.has(categoryId)) {
+          suggestedExpenseCategoryId = categoryId
+          matchStatus = "suggested_line"
+        } else if (m.kind === "income" && lineId && catalog.incomeLineIdSet.has(lineId)) {
+          suggestedIncomeLineId = lineId
+          matchStatus = "suggested_line"
         }
 
-        if (matchStatus !== "suggested_line") {
-          const pl = m.propose_line_name?.trim()
-          if (pl) {
-            suggestedLineName = pl
-            suggestedCategoryName = m.propose_category_name?.trim() || null
-            const ec = m.existing_category_id?.trim() || null
-            if (ec && catalog.categoryIdSet.has(ec)) {
-              suggestedUseExistingCategoryId = ec
-            }
+        if (matchStatus !== "suggested_line" && m.kind === "expense") {
+          const proposedCategory = m.propose_category_name?.trim() || null
+          if (proposedCategory) {
+            suggestedCategoryName = proposedCategory
             matchStatus = "needs_new_line"
           }
         }
@@ -375,11 +373,12 @@ export async function runAnthropicMatch(batchId: string): Promise<ActionResult> 
           .update(importedTransactions)
           .set({
             direction,
+            suggestedExpenseCategoryId,
             suggestedExpenseLineId,
             suggestedIncomeLineId,
             suggestedCategoryName,
-            suggestedLineName,
-            suggestedUseExistingCategoryId,
+            suggestedLineName: null,
+            suggestedUseExistingCategoryId: null,
             modelConfidence: conf,
             modelNotes: notes,
             matchStatus,
@@ -408,7 +407,7 @@ export async function runAnthropicMatch(batchId: string): Promise<ActionResult> 
 
 const acceptMatchSchema = z.object({
   importedTransactionId: z.string().uuid(),
-  expenseLineId: z.string().uuid().optional(),
+  expenseCategoryId: z.string().uuid().optional(),
   incomeLineId: z.string().uuid().optional(),
 })
 
@@ -417,12 +416,12 @@ export async function acceptImportMatch(input: unknown): Promise<ActionResult> {
   if (!db) return err("Database not configured (set DATABASE_URL).")
   const parsed = acceptMatchSchema.safeParse(input)
   if (!parsed.success) return err(parsed.error.issues.map((i) => i.message).join(" "))
-  const { importedTransactionId, expenseLineId, incomeLineId } = parsed.data
-  if (!expenseLineId && !incomeLineId) {
-    return err("Provide expenseLineId or incomeLineId")
+  const { importedTransactionId, expenseCategoryId, incomeLineId } = parsed.data
+  if (!expenseCategoryId && !incomeLineId) {
+    return err("Provide expenseCategoryId or incomeLineId")
   }
-  if (expenseLineId && incomeLineId) {
-    return err("Provide only one of expenseLineId or incomeLineId")
+  if (expenseCategoryId && incomeLineId) {
+    return err("Provide only one of expenseCategoryId or incomeLineId")
   }
 
   const [row] = await db
@@ -432,16 +431,18 @@ export async function acceptImportMatch(input: unknown): Promise<ActionResult> {
     .limit(1)
   if (!row) return err("Import row not found")
   if (row.postedRecordId) return err("Already posted")
+  const postedAmount = normalizedPostedRecordAmount(row.amount)
 
   const catalog = await loadBudgetLineCatalog(db)
 
-  if (expenseLineId) {
-    if (!catalog.expenseLineIdSet.has(expenseLineId)) return err("Invalid expense line")
+  if (expenseCategoryId) {
+    if (!catalog.categoryIdSet.has(expenseCategoryId)) return err("Invalid expense category")
     const [rec] = await db
       .insert(expenseRecords)
       .values({
-        expenseLineId,
-        amount: row.amount,
+        expenseCategoryId,
+        expenseLineId: null,
+        amount: postedAmount,
         currency: row.currency,
         occurredOn: row.occurredOn,
       })
@@ -452,8 +453,12 @@ export async function acceptImportMatch(input: unknown): Promise<ActionResult> {
         matchStatus: "posted",
         postedRecordKind: "expense",
         postedRecordId: rec.id,
-        suggestedExpenseLineId: expenseLineId,
+        suggestedExpenseCategoryId: expenseCategoryId,
+        suggestedExpenseLineId: null,
         suggestedIncomeLineId: null,
+        suggestedCategoryName: null,
+        suggestedLineName: null,
+        suggestedUseExistingCategoryId: null,
         direction: "expense",
       })
       .where(eq(importedTransactions.id, importedTransactionId))
@@ -464,7 +469,7 @@ export async function acceptImportMatch(input: unknown): Promise<ActionResult> {
       .insert(incomeRecords)
       .values({
         incomeLineId,
-        amount: row.amount,
+        amount: postedAmount,
         currency: row.currency,
         occurredOn: row.occurredOn,
       })
@@ -475,8 +480,12 @@ export async function acceptImportMatch(input: unknown): Promise<ActionResult> {
         matchStatus: "posted",
         postedRecordKind: "income",
         postedRecordId: rec.id,
+        suggestedExpenseCategoryId: null,
         suggestedIncomeLineId: incomeLineId,
         suggestedExpenseLineId: null,
+        suggestedCategoryName: null,
+        suggestedLineName: null,
+        suggestedUseExistingCategoryId: null,
         direction: "income",
       })
       .where(eq(importedTransactions.id, importedTransactionId))
@@ -489,17 +498,16 @@ export async function acceptImportMatch(input: unknown): Promise<ActionResult> {
 
 const acceptNewSchema = z.object({
   importedTransactionId: z.string().uuid(),
-  lineName: z.string().min(1).max(256),
   categoryName: z.string().min(1).max(256).optional(),
   categoryId: z.string().uuid().optional(),
 })
 
-export async function acceptNewLineAndPost(input: unknown): Promise<ActionResult> {
+export async function acceptNewCategoryAndPost(input: unknown): Promise<ActionResult> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
   const parsed = acceptNewSchema.safeParse(input)
   if (!parsed.success) return err(parsed.error.issues.map((i) => i.message).join(" "))
-  const { importedTransactionId, lineName, categoryName, categoryId } = parsed.data
+  const { importedTransactionId, categoryName, categoryId } = parsed.data
 
   const [row] = await db
     .select()
@@ -508,6 +516,7 @@ export async function acceptNewLineAndPost(input: unknown): Promise<ActionResult
     .limit(1)
   if (!row) return err("Import row not found")
   if (row.postedRecordId) return err("Already posted")
+  const postedAmount = normalizedPostedRecordAmount(row.amount)
 
   const catalog = await loadBudgetLineCatalog(db)
 
@@ -530,19 +539,12 @@ export async function acceptNewLineAndPost(input: unknown): Promise<ActionResult
         catId = cat.id
       }
 
-      const [line] = await tx
-        .insert(expenseLines)
-        .values({
-          categoryId: catId!,
-          name: lineName,
-        })
-        .returning({ id: expenseLines.id })
-
       const [rec] = await tx
         .insert(expenseRecords)
         .values({
-          expenseLineId: line.id,
-          amount: row.amount,
+          expenseCategoryId: catId,
+          expenseLineId: null,
+          amount: postedAmount,
           currency: row.currency,
           occurredOn: row.occurredOn,
         })
@@ -554,7 +556,11 @@ export async function acceptNewLineAndPost(input: unknown): Promise<ActionResult
           matchStatus: "posted",
           postedRecordKind: "expense",
           postedRecordId: rec.id,
-          suggestedExpenseLineId: line.id,
+          suggestedExpenseCategoryId: catId,
+          suggestedExpenseLineId: null,
+          suggestedCategoryName: null,
+          suggestedLineName: null,
+          suggestedUseExistingCategoryId: null,
           direction: "expense",
         })
         .where(eq(importedTransactions.id, importedTransactionId))
@@ -605,8 +611,8 @@ export async function getImportBatchDetailAction(batchId: string) {
   return ok(d)
 }
 
-/** One-click: post using AI-suggested new category/line fields on the row. */
-export async function acceptSuggestedNewLineFromImport(
+/** One-click: post using AI-suggested category fields on the row. */
+export async function acceptSuggestedCategoryFromImport(
   importedTransactionId: string,
 ): Promise<ActionResult> {
   const db = getDb()
@@ -617,18 +623,18 @@ export async function acceptSuggestedNewLineFromImport(
     .where(eq(importedTransactions.id, importedTransactionId))
     .limit(1)
   if (!row) return err("Row not found")
-  const name = row.suggestedLineName?.trim()
-  if (!name) return err("No suggested line name on this row")
-  return acceptNewLineAndPost({
+  if (!row.suggestedExpenseCategoryId && !row.suggestedCategoryName?.trim()) {
+    return err("No suggested category on this row")
+  }
+  return acceptNewCategoryAndPost({
     importedTransactionId,
-    lineName: name,
     categoryName: row.suggestedCategoryName?.trim() || undefined,
-    categoryId: row.suggestedUseExistingCategoryId ?? undefined,
+    categoryId: row.suggestedExpenseCategoryId ?? undefined,
   })
 }
 
-/** One-click: post using AI-suggested existing line IDs on the row. */
-export async function acceptSuggestedLineFromImport(
+/** One-click: post using AI-suggested existing category/income IDs on the row. */
+export async function acceptSuggestedMatchFromImport(
   importedTransactionId: string,
 ): Promise<ActionResult> {
   const db = getDb()
@@ -639,10 +645,10 @@ export async function acceptSuggestedLineFromImport(
     .where(eq(importedTransactions.id, importedTransactionId))
     .limit(1)
   if (!row) return err("Row not found")
-  if (row.suggestedExpenseLineId) {
+  if (row.suggestedExpenseCategoryId) {
     return acceptImportMatch({
       importedTransactionId,
-      expenseLineId: row.suggestedExpenseLineId,
+      expenseCategoryId: row.suggestedExpenseCategoryId,
     })
   }
   if (row.suggestedIncomeLineId) {
@@ -651,5 +657,5 @@ export async function acceptSuggestedLineFromImport(
       incomeLineId: row.suggestedIncomeLineId,
     })
   }
-  return err("No suggested line on this row")
+  return err("No suggested match on this row")
 }

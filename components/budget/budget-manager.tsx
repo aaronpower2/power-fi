@@ -26,6 +26,7 @@ import {
   deleteIncomeRecord,
   updateExpenseCategory,
   updateExpenseLine,
+  updateExpenseRecord,
   updateIncomeLine,
 } from "@/lib/actions/budget"
 import { SUPPORTED_CURRENCIES } from "@/lib/currency/iso4217"
@@ -46,6 +47,7 @@ import {
   incomeRecordSchema,
   updateExpenseCategorySchema,
   updateExpenseLineSchema,
+  updateExpenseRecordSchema,
   updateIncomeLineSchema,
 } from "@/lib/validations/budget"
 import { Button } from "@/components/ui/button"
@@ -115,10 +117,20 @@ import {
   Plus,
   Trash2,
 } from "lucide-react"
-import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as RechartsTooltip } from "recharts"
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  ResponsiveContainer,
+  Tooltip as RechartsTooltip,
+  XAxis,
+  YAxis,
+} from "recharts"
 import { z } from "zod"
 
 type BudgetData = Awaited<ReturnType<typeof getBudgetPageData>>
+type SupportedCurrency = (typeof SUPPORTED_CURRENCIES)[number]
 
 function formatSummaryCcyValue(ccy: string, value: number) {
   const code = ccy.toUpperCase()
@@ -214,16 +226,9 @@ type ExpenseCatDialogState =
 
 type ExpenseLineDialogState =
   | "create"
+  | { createCategoryId: string }
   | { edit: BudgetData["expenseLines"][number] }
   | null
-
-const EXPENSE_PIE_COLORS = [
-  "var(--color-chart-1)",
-  "var(--color-chart-2)",
-  "var(--color-chart-3)",
-  "var(--color-chart-4)",
-  "var(--color-chart-5)",
-]
 
 function ExpenseCategoryPieCard({
   data,
@@ -233,90 +238,164 @@ function ExpenseCategoryPieCard({
   onManageCategories: () => void
 }) {
   const ccy = data.summaryCurrency
-  const pieRows = data.expenseCategories
+  const chartRows = data.expenseCategories
     .map((c) => ({
       id: c.id,
       name: c.name,
-      value: data.expensePlannedByCategoryId[c.id] ?? 0,
+      planned: data.expensePlannedByCategoryId[c.id] ?? 0,
+      actual: data.expenseActualByCategoryId[c.id] ?? 0,
     }))
-    .filter((d) => d.value > 0)
+    .filter((d) => d.planned > 0 || d.actual > 0)
+    .map((d) => ({
+      ...d,
+      value: Math.max(d.planned, d.actual),
+      variance: d.actual - d.planned,
+      status: d.planned <= 0 ? "unbudgeted" : d.actual <= d.planned ? "under" : "over",
+    }))
     .sort((a, b) => b.value - a.value)
 
-  const totalPlanned = pieRows.reduce((s, d) => s + d.value, 0)
+  const totalActual = chartRows.reduce((s, d) => s + d.actual, 0)
 
   return (
     <Card size="sm">
       <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <CardHeaderTitleRow
           title={<CardTitle>Expense categories</CardTitle>}
-          info="Planned amounts for this month, rolled up by category and converted to your summary currency (same as the summary cards)."
+          info="Actual spend by category for this month in your selected summary currency. Bars turn green when spend is within budget, red when over, and neutral when no category budget is set."
         />
         <Button size="sm" variant="default" className="shrink-0" onClick={onManageCategories}>
           Manage categories
         </Button>
       </CardHeader>
       <CardContent className="pt-0 pb-3">
-        {pieRows.length === 0 ? (
+        {chartRows.length === 0 ? (
           <p className="text-muted-foreground py-4 text-center text-sm">
             {data.expenseCategories.length === 0
-              ? "Add categories (with optional recurring budgets), then lines, to see planned spending by category."
-              : "No planned amounts this month yet — set a recurring budget on categories or finalize a past month."}
+              ? "Add categories (with optional recurring budgets), then lines, to see spending by category."
+              : "No category spending or budgets yet for this month."}
           </p>
         ) : (
-          <div className="flex flex-col items-center gap-3 sm:flex-row sm:items-center sm:gap-5">
-            <div className="h-[168px] w-full max-w-[200px] shrink-0">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={pieRows}
-                    dataKey="value"
-                    nameKey="name"
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={38}
-                    outerRadius={64}
-                    paddingAngle={2}
-                  >
-                    {pieRows.map((_, i) => (
-                      <Cell key={pieRows[i]!.id} fill={EXPENSE_PIE_COLORS[i % EXPENSE_PIE_COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <RechartsTooltip
-                    content={({ active, payload }) => (
-                      <ExpensePieTooltip
-                        active={active}
-                        payload={payload}
-                        total={totalPlanned}
-                        currency={ccy}
-                      />
-                    )}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-            <ul className="text-muted-foreground w-full max-w-md space-y-1 text-xs sm:flex-1 sm:text-sm">
-              {pieRows.map((row, i) => {
-                const pct = totalPlanned > 0 ? (row.value / totalPlanned) * 100 : 0
-                return (
-                  <li key={row.id} className="flex items-center gap-1.5">
-                    <span
-                      className="size-2 shrink-0 rounded-sm"
-                      style={{ backgroundColor: EXPENSE_PIE_COLORS[i % EXPENSE_PIE_COLORS.length] }}
-                      aria-hidden
+          <div className="h-[280px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartRows} margin={{ top: 8, right: 12, left: 4, bottom: 24 }}>
+                <CartesianGrid vertical={false} stroke="var(--border)" strokeOpacity={0.35} />
+                <XAxis
+                  dataKey="name"
+                  interval={0}
+                  height={72}
+                  tickLine={false}
+                  axisLine={false}
+                  angle={-45}
+                  textAnchor="end"
+                  tick={{ fontSize: 11 }}
+                />
+                <YAxis
+                  tickLine={false}
+                  axisLine={false}
+                  tick={{ fontSize: 11 }}
+                  tickFormatter={(value) => {
+                    const amount = Number(value)
+                    if (amount >= 1000) return `${Math.round(amount / 1000)}k`
+                    return String(Math.round(amount))
+                  }}
+                />
+                <Bar dataKey="value" shape={<ExpenseBudgetBarShape />} />
+                <RechartsTooltip
+                  content={({ active, payload }) => (
+                    <ExpensePieTooltip
+                      active={active}
+                      payload={payload}
+                      total={totalActual}
+                      currency={ccy}
                     />
-                    <span className="min-w-0 flex-1 truncate font-medium text-foreground">{row.name}</span>
-                    <span className="tabular-nums">{pct.toFixed(0)}%</span>
-                    <span className="text-foreground w-28 shrink-0 text-right tabular-nums">
-                      {formatCurrency(row.value, ccy, { maximumFractionDigits: 0 })}
-                    </span>
-                  </li>
-                )
-              })}
-            </ul>
+                  )}
+                />
+              </BarChart>
+            </ResponsiveContainer>
           </div>
         )}
       </CardContent>
     </Card>
+  )
+}
+
+function ExpenseBudgetBarShape(props: {
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+  payload?: {
+    planned?: number
+    actual?: number
+    status?: string
+  }
+}) {
+  const x = Number(props.x ?? 0)
+  const y = Number(props.y ?? 0)
+  const width = Number(props.width ?? 0)
+  const height = Number(props.height ?? 0)
+  const planned = Number(props.payload?.planned ?? 0)
+  const actual = Number(props.payload?.actual ?? 0)
+  const status = props.payload?.status ?? "unbudgeted"
+
+  if (width <= 0 || height <= 0) return null
+
+  const radius = 6
+  if (status === "over") {
+    return (
+      <rect
+        x={x}
+        y={y}
+        width={width}
+        height={height}
+        rx={radius}
+        ry={radius}
+        fill="var(--destructive)"
+      />
+    )
+  }
+
+  if (status === "unbudgeted" || planned <= 0) {
+    return (
+      <rect
+        x={x}
+        y={y}
+        width={width}
+        height={height}
+        rx={radius}
+        ry={radius}
+        fill="var(--muted)"
+      />
+    )
+  }
+
+  const fillRatio = planned > 0 ? Math.max(0, Math.min(1, actual / planned)) : 0
+  const fillHeight = height * fillRatio
+  const fillY = y + height - fillHeight
+
+  return (
+    <>
+      <rect
+        x={x}
+        y={y}
+        width={width}
+        height={height}
+        rx={radius}
+        ry={radius}
+        fill="var(--muted)"
+      />
+      {fillHeight > 0 ? (
+        <rect
+          x={x}
+          y={fillY}
+          width={width}
+          height={fillHeight}
+          rx={radius}
+          ry={radius}
+          fill="var(--primary)"
+        />
+      ) : null}
+    </>
   )
 }
 
@@ -334,9 +413,13 @@ function ExpensePieTooltip({
   if (!active || !payload?.length) return null
   const p = payload[0]
   const name = p?.name != null ? String(p.name) : ""
-  const raw = p?.value
-  const value = typeof raw === "number" ? raw : Number(raw ?? 0)
-  const pct = total > 0 ? (value / total) * 100 : 0
+  const row = (p as { payload?: { planned?: number; actual?: number; variance?: number; status?: string } })
+    .payload
+  const actual = row?.actual ?? 0
+  const planned = row?.planned ?? 0
+  const variance = row?.variance ?? 0
+  const status = row?.status ?? "unbudgeted"
+  const pct = total > 0 ? (actual / total) * 100 : 0
   return (
     <div
       className="rounded-md border bg-card px-3 py-2 text-sm shadow-md"
@@ -344,7 +427,23 @@ function ExpensePieTooltip({
     >
       <div className="font-medium">{name}</div>
       <div className="text-muted-foreground tabular-nums">
-        {formatCurrency(value, currency, { maximumFractionDigits: 0 })} ({pct.toFixed(1)}%)
+        Actual: {formatCurrency(actual, currency, { maximumFractionDigits: 0 })} ({pct.toFixed(1)}%)
+      </div>
+      <div className="text-muted-foreground tabular-nums">
+        Budget: {formatCurrency(planned, currency, { maximumFractionDigits: 0 })}
+      </div>
+      <div
+        className={cn(
+          "tabular-nums",
+          status === "over"
+            ? "text-destructive"
+            : status === "under"
+              ? "text-primary"
+              : "text-muted-foreground",
+        )}
+      >
+        {status === "over" ? "Over" : status === "under" ? "Under" : "Unbudgeted"} by{" "}
+        {formatCurrency(Math.abs(variance), currency, { maximumFractionDigits: 0 })}
       </div>
     </div>
   )
@@ -630,8 +729,8 @@ function ExpenseCategoriesManageDialog({
             </Button>
           </DialogHeader>
           <p className="text-muted-foreground mt-2 text-sm">
-            Edit name and planned budget per row, then <span className="font-medium">Save</span>. Expense
-            lines under each category track actual spend.
+            Edit name and planned budget per row, then <span className="font-medium">Save</span>. Actual
+            spend rolls up directly into these categories.
           </p>
         </div>
         <div className="min-h-0 flex-1 overflow-x-auto overflow-y-auto px-4 pb-6 pt-4">
@@ -688,10 +787,15 @@ export function BudgetManager({ data }: { data: BudgetData }) {
   const refresh = () => router.refresh()
 
   const [activeTab, setActiveTab] = useState("income")
+  const [mounted, setMounted] = useState(false)
   const [incomeLineDialog, setIncomeLineDialog] = useState<IncomeLineDialogState>(null)
   const [expenseCatDialog, setExpenseCatDialog] = useState<ExpenseCatDialogState>(null)
   const [expenseLineDialog, setExpenseLineDialog] = useState<ExpenseLineDialogState>(null)
   const [expenseCategoriesManageOpen, setExpenseCategoriesManageOpen] = useState(false)
+
+  useEffect(() => {
+    setMounted(true)
+  }, [])
 
   return (
     <div id="budget-detail" className="space-y-6 scroll-mt-4">
@@ -752,32 +856,46 @@ export function BudgetManager({ data }: { data: BudgetData }) {
         </Card>
       </div>
 
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList>
-          <TabsTrigger value="income">Income</TabsTrigger>
-          <TabsTrigger value="expenses">Expenses</TabsTrigger>
-        </TabsList>
-        <TabsContent value="income" className="mt-4">
-          <IncomeTab
-            data={data}
-            refresh={refresh}
-            lineDialog={incomeLineDialog}
-            setLineDialog={setIncomeLineDialog}
-          />
-        </TabsContent>
-        <TabsContent value="expenses" className="mt-4">
-          <ExpensesTab
-            data={data}
-            refresh={refresh}
-            catDialog={expenseCatDialog}
-            setCatDialog={setExpenseCatDialog}
-            lineDialog={expenseLineDialog}
-            setLineDialog={setExpenseLineDialog}
-            categoriesManageOpen={expenseCategoriesManageOpen}
-            setCategoriesManageOpen={setExpenseCategoriesManageOpen}
-          />
-        </TabsContent>
-      </Tabs>
+      {!mounted ? (
+        <div className="space-y-4">
+          <div className="bg-muted inline-flex h-8 w-fit items-center rounded-lg p-[3px] text-sm text-muted-foreground">
+            <span className="bg-background text-foreground rounded-md px-3 py-1 font-medium shadow-sm">
+              Income
+            </span>
+            <span className="px-3 py-1">Expenses</span>
+          </div>
+          <div className="rounded-lg border p-6 text-sm text-muted-foreground">
+            Loading budget tools…
+          </div>
+        </div>
+      ) : (
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+          <TabsList>
+            <TabsTrigger value="income">Income</TabsTrigger>
+            <TabsTrigger value="expenses">Expenses</TabsTrigger>
+          </TabsList>
+          <TabsContent value="income" className="mt-4">
+            <IncomeTab
+              data={data}
+              refresh={refresh}
+              lineDialog={incomeLineDialog}
+              setLineDialog={setIncomeLineDialog}
+            />
+          </TabsContent>
+          <TabsContent value="expenses" className="mt-4">
+            <ExpensesTab
+              data={data}
+              refresh={refresh}
+              catDialog={expenseCatDialog}
+              setCatDialog={setExpenseCatDialog}
+              lineDialog={expenseLineDialog}
+              setLineDialog={setExpenseLineDialog}
+              categoriesManageOpen={expenseCategoriesManageOpen}
+              setCategoriesManageOpen={setExpenseCategoriesManageOpen}
+            />
+          </TabsContent>
+        </Tabs>
+      )}
     </div>
   )
 }
@@ -965,6 +1083,7 @@ function IncomeTab({
         <IncomeRecordsDialog
           line={recLine}
           records={data.incomeRecordsByLineId[recLine.id] ?? []}
+          defaultCurrency={data.summaryCurrency}
           open={!!recLine}
           onOpenChange={(o) => !o && setRecLine(null)}
           onSaved={refresh}
@@ -1240,12 +1359,14 @@ function IncomeLineFormDialog({
 function IncomeRecordsDialog({
   line,
   records,
+  defaultCurrency,
   open,
   onOpenChange,
   onSaved,
 }: {
   line: { id: string; name: string; isRecurring: boolean }
   records: { id: string; amount: string; occurredOn: string; currency: string | null }[]
+  defaultCurrency: SupportedCurrency
   open: boolean
   onOpenChange: (o: boolean) => void
   onSaved: () => void
@@ -1255,7 +1376,7 @@ function IncomeRecordsDialog({
     defaultValues: {
       incomeLineId: line.id,
       amount: 0,
-      currency: "AED",
+      currency: defaultCurrency,
       occurredOn: new Date().toISOString().slice(0, 10),
     },
   })
@@ -1265,11 +1386,11 @@ function IncomeRecordsDialog({
       addForm.reset({
         incomeLineId: line.id,
         amount: 0,
-        currency: "AED",
+        currency: defaultCurrency,
         occurredOn: new Date().toISOString().slice(0, 10),
       })
     }
-  }, [open, line.id, addForm])
+  }, [open, line.id, defaultCurrency, addForm])
 
   async function addRec(values: z.infer<typeof incomeRecordSchema>) {
     const r = await createIncomeRecord({ ...values, incomeLineId: line.id })
@@ -1278,7 +1399,7 @@ function IncomeRecordsDialog({
       addForm.reset({
         incomeLineId: line.id,
         amount: 0,
-        currency: "AED",
+        currency: defaultCurrency,
         occurredOn: new Date().toISOString().slice(0, 10),
       })
       onSaved()
@@ -1430,10 +1551,20 @@ function ExpensesTab({
   categoriesManageOpen: boolean
   setCategoriesManageOpen: Dispatch<SetStateAction<boolean>>
 }) {
-  const [recLine, setRecLine] = useState<(typeof data.expenseLines)[0] | null>(null)
+  const [expandedCats, setExpandedCats] = useState<Record<string, boolean>>({})
   const [delCat, setDelCat] = useState<string | null>(null)
-  const [delLine, setDelLine] = useState<string | null>(null)
   const [importTxOpen, setImportTxOpen] = useState(false)
+  const [editRecord, setEditRecord] = useState<{
+    id: string
+    categoryId: string
+    categoryName: string
+    amount: string
+    currency?: string | null
+    occurredOn: string
+    description: string
+    lineId?: string | null
+    lineName?: string | null
+  } | null>(null)
 
   return (
     <div className="space-y-6">
@@ -1457,14 +1588,8 @@ function ExpensesTab({
       <Card>
         <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <CardHeaderTitleRow
-            title={<CardTitle>Expense lines</CardTitle>}
-            info={
-              <>
-                Planned budgets are set on each category (see pie card). Lines are for detail: post actuals
-                here or use Import &amp; match transactions. Amounts stay in each line&apos;s native
-                currencies.
-              </>
-            }
+            title={<CardTitle>Expenses by category</CardTitle>}
+            info="Compact category table with rolled-up actuals in the selected summary currency. Toggle a row to reveal posted transactions for this month."
           />
           <div className="flex shrink-0 flex-wrap gap-2">
             <Button
@@ -1476,8 +1601,8 @@ function ExpensesTab({
               <FileSearch className="size-4" />
               Import &amp; match
             </Button>
-            <Button size="sm" variant="default" className="shrink-0" onClick={() => setLineDialog("create")}>
-              Add expense line
+            <Button size="sm" variant="default" className="shrink-0" onClick={() => setCatDialog("create")}>
+              Add category
             </Button>
           </div>
         </CardHeader>
@@ -1486,62 +1611,197 @@ function ExpensesTab({
             <TableHeader>
               <TableRow>
                 <TableHead>Category</TableHead>
-                <TableHead>Line</TableHead>
-                <TableHead className="text-right">Actual</TableHead>
-                <TableHead className="w-24 text-right">Actions</TableHead>
+                <TableHead className="w-24 text-right">Tx</TableHead>
+                <TableHead className="w-36 text-right">Actual</TableHead>
+                <TableHead className="w-28 text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.expenseLines.length === 0 ? (
+              {data.expenseCategories.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={4} className="text-muted-foreground h-16 text-center">
-                    <span className="inline-flex items-center gap-1">
-                      None yet
-                      <InfoTooltip>Add a category, then use the card header buttons above.</InfoTooltip>
-                    </span>
+                    No categories yet.
                   </TableCell>
                 </TableRow>
               ) : (
-                data.expenseLines.map((el) => {
-                  const actual = data.expenseActualByLineNative[el.id]
-                  return (
-                    <TableRow key={el.id}>
-                      <TableCell className="text-muted-foreground text-sm">{el.categoryName}</TableCell>
-                      <TableCell className="font-medium">{el.name}</TableCell>
-                      <TableCell className="text-right">{formatNativeLineTotals(actual)}</TableCell>
-                      <TableCell>
-                        <div className="flex items-center justify-end gap-0.5">
+                data.expenseCategories.flatMap((cat) => {
+                  const txs = data.expenseTransactionsByCategoryId[cat.id] ?? []
+                  const isOpen = expandedCats[cat.id] ?? false
+                  const total = data.expenseActualByCategoryId[cat.id] ?? 0
+
+                  const rows: React.ReactNode[] = [
+                    <TableRow
+                      key={cat.id}
+                      className="cursor-pointer"
+                      onClick={() =>
+                        setExpandedCats((current) => ({ ...current, [cat.id]: !isOpen }))
+                      }
+                    >
+                      <TableCell className="font-medium">
+                        <div className="flex items-center gap-2">
+                          <span className="text-muted-foreground inline-block w-3 text-center text-xs">
+                            {isOpen ? "−" : "+"}
+                          </span>
+                          <span>{cat.name}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-muted-foreground text-right tabular-nums">
+                        {txs.length}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {formatCurrency(total, data.summaryCurrency)}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex justify-end gap-1">
+                          <Button
+                            type="button"
+                            size="icon-sm"
+                            variant="ghost"
+                            aria-label={`Add expense line to ${cat.name}`}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setLineDialog({ createCategoryId: cat.id })
+                            }}
+                          >
+                            <Plus className="size-4" />
+                          </Button>
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
-                              <Button variant="ghost" size="icon-sm" aria-label="More actions">
-                                <MoreHorizontal />
+                              <Button
+                                type="button"
+                                size="icon-sm"
+                                variant="ghost"
+                                aria-label={`Category actions for ${cat.name}`}
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <MoreHorizontal className="size-4" />
                               </Button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
-                              <DropdownMenuItem onClick={() => setRecLine(el)}>
-                                <ClipboardList className="size-4 opacity-70" />
-                                Records
-                              </DropdownMenuItem>
-                              <DropdownMenuItem onClick={() => setLineDialog({ edit: el })}>
+                              <DropdownMenuItem
+                                onClick={(e) => {
+                                  e.preventDefault()
+                                  setCatDialog({ edit: cat })
+                                }}
+                              >
                                 <Pencil className="size-4 opacity-70" />
-                                Edit
+                                Edit category
                               </DropdownMenuItem>
                               <DropdownMenuItem
                                 variant="destructive"
                                 onSelect={(e) => {
                                   e.preventDefault()
-                                  setDelLine(el.id)
+                                  setDelCat(cat.id)
                                 }}
                               >
                                 <Trash2 className="size-4 opacity-70" />
-                                Delete
+                                Delete category
                               </DropdownMenuItem>
                             </DropdownMenuContent>
                           </DropdownMenu>
                         </div>
                       </TableCell>
-                    </TableRow>
-                  )
+                    </TableRow>,
+                  ]
+
+                  if (isOpen) {
+                    rows.push(
+                      <TableRow key={`${cat.id}-details`}>
+                        <TableCell colSpan={4} className="bg-muted/20 p-0">
+                          {txs.length === 0 ? (
+                            <div className="text-muted-foreground px-4 py-3 text-sm">
+                              No posted transactions yet.
+                            </div>
+                          ) : (
+                            <Table>
+                              <TableHeader>
+                                <TableRow>
+                                  <TableHead className="w-28">Date</TableHead>
+                                  <TableHead className="w-40">Line</TableHead>
+                                  <TableHead>Description</TableHead>
+                                  <TableHead className="w-32 text-right">Amount</TableHead>
+                                  <TableHead className="w-24 text-right">Actions</TableHead>
+                                </TableRow>
+                              </TableHeader>
+                              <TableBody>
+                                {txs.map((tx) => (
+                                  <TableRow key={tx.id}>
+                                    <TableCell className="text-muted-foreground py-2 font-mono text-xs">
+                                      {tx.occurredOn}
+                                    </TableCell>
+                                    <TableCell className="py-2 text-xs">
+                                      {tx.lineName ?? (
+                                        <span className="text-muted-foreground">—</span>
+                                      )}
+                                    </TableCell>
+                                    <TableCell
+                                      className="max-w-0 py-2 truncate"
+                                      title={tx.description}
+                                    >
+                                      {tx.description}
+                                    </TableCell>
+                                    <TableCell className="py-2 text-right tabular-nums">
+                                      {formatCurrency(
+                                        Number(tx.amount),
+                                        tx.currency ?? data.summaryCurrency,
+                                      )}
+                                    </TableCell>
+                                    <TableCell className="py-2 text-right">
+                                      {tx.isManual ? (
+                                        <div className="flex justify-end gap-1">
+                                          <Button
+                                            type="button"
+                                            size="icon-sm"
+                                            variant="ghost"
+                                            aria-label={`Edit manual expense entry ${tx.description}`}
+                                            onClick={() =>
+                                              setEditRecord({
+                                                id: tx.id,
+                                                categoryId: cat.id,
+                                                categoryName: cat.name,
+                                                amount: tx.amount,
+                                                currency: tx.currency ?? data.summaryCurrency,
+                                                occurredOn: tx.occurredOn,
+                                                description: tx.description,
+                                                lineId: tx.lineId ?? null,
+                                                lineName: tx.lineName ?? null,
+                                              })
+                                            }
+                                          >
+                                            <Pencil className="size-4" />
+                                          </Button>
+                                          <Button
+                                            type="button"
+                                            size="icon-sm"
+                                            variant="ghost"
+                                            className="text-destructive"
+                                            aria-label={`Delete manual expense entry ${tx.description}`}
+                                            onClick={async () => {
+                                              const res = await deleteExpenseRecord(tx.id)
+                                              if (res.ok) {
+                                                toast.success("Manual expense deleted")
+                                                refresh()
+                                              } else toast.error(res.error)
+                                            }}
+                                          >
+                                            <Trash2 className="size-4" />
+                                          </Button>
+                                        </div>
+                                      ) : (
+                                        <span className="text-muted-foreground text-xs">Imported</span>
+                                      )}
+                                    </TableCell>
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          )}
+                        </TableCell>
+                      </TableRow>,
+                    )
+                  }
+
+                  return rows
                 })
               )}
             </TableBody>
@@ -1554,7 +1814,7 @@ function ExpensesTab({
           <DialogHeader className="border-b px-4 py-3 pr-14 shrink-0 space-y-0 text-left">
             <DialogTitle>Import &amp; match transactions</DialogTitle>
             <p className="text-muted-foreground text-sm font-normal">
-              Budget month {data.ym} (UTC). Posted expense lines update actuals on this tab.
+              Budget month {data.ym} (UTC). Posted expense categories update actuals on this tab.
             </p>
           </DialogHeader>
           <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-6 pt-4">
@@ -1577,20 +1837,33 @@ function ExpensesTab({
         open={lineDialog !== null}
         onOpenChange={(o) => !o && setLineDialog(null)}
         categories={data.expenseCategories}
-        line={lineDialog && lineDialog !== "create" ? lineDialog.edit : undefined}
+        prefillCategoryId={
+          lineDialog && lineDialog !== "create" && "createCategoryId" in lineDialog
+            ? lineDialog.createCategoryId
+            : undefined
+        }
+        defaultRecordCurrency={data.summaryCurrency}
+        defaultOccurredOn={defaultBudgetRecordDateForMonth(data.monthStart, data.monthEnd)}
+        line={
+          lineDialog && lineDialog !== "create" && "edit" in lineDialog
+            ? lineDialog.edit
+            : undefined
+        }
         onSaved={() => {
           setLineDialog(null)
           refresh()
         }}
       />
 
-      {recLine ? (
-        <ExpenseRecordsDialog
-          line={recLine}
-          records={data.expenseRecordsByLineId[recLine.id] ?? []}
-          open={!!recLine}
-          onOpenChange={(o) => !o && setRecLine(null)}
-          onSaved={refresh}
+      {editRecord ? (
+        <EditExpenseRecordDialog
+          record={editRecord}
+          open={!!editRecord}
+          onOpenChange={(o) => !o && setEditRecord(null)}
+          onSaved={() => {
+            setEditRecord(null)
+            refresh()
+          }}
         />
       ) : null}
 
@@ -1620,31 +1893,6 @@ function ExpensesTab({
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={!!delLine} onOpenChange={(o) => !o && setDelLine(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete expense line?</AlertDialogTitle>
-            <AlertDialogDescription>Deletes all records for this line.</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={async () => {
-                if (!delLine) return
-                const r = await deleteExpenseLine(delLine)
-                setDelLine(null)
-                if (r.ok) {
-                  toast.success("Line deleted")
-                  refresh()
-                } else toast.error(r.error)
-              }}
-            >
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   )
 }
@@ -1876,37 +2124,46 @@ function ExpenseCategoryFormDialog({
 type ExpenseLineFormValues = {
   categoryId: string
   name: string
+  initialAmount: string
 }
 
 function ExpenseLineFormDialog({
   open,
   onOpenChange,
   categories,
+  prefillCategoryId,
+  defaultRecordCurrency,
+  defaultOccurredOn,
   line,
   onSaved,
 }: {
   open: boolean
   onOpenChange: (o: boolean) => void
   categories: { id: string; name: string }[]
+  prefillCategoryId?: string
+  defaultRecordCurrency: SupportedCurrency
+  defaultOccurredOn: string
   line?: BudgetData["expenseLines"][number]
   onSaved: () => void
 }) {
   const isEdit = !!line
   const form = useForm<ExpenseLineFormValues>({
     defaultValues: {
-      categoryId: line?.categoryId ?? categories[0]?.id ?? "",
+      categoryId: line?.categoryId ?? prefillCategoryId ?? categories[0]?.id ?? "",
       name: "",
+      initialAmount: "",
     },
   })
 
   useEffect(() => {
     if (open) {
       form.reset({
-        categoryId: line?.categoryId ?? categories[0]?.id ?? "",
+        categoryId: line?.categoryId ?? prefillCategoryId ?? categories[0]?.id ?? "",
         name: line?.name ?? "",
+        initialAmount: "",
       })
     }
-  }, [open, line, categories, form])
+  }, [open, line, categories, prefillCategoryId, form])
 
   async function onSubmit(values: ExpenseLineFormValues) {
     const body = {
@@ -1926,6 +2183,11 @@ function ExpenseLineFormDialog({
         onSaved()
       } else toast.error(r.error)
     } else {
+      const amount = Number(values.initialAmount)
+      if (!Number.isFinite(amount) || amount <= 0) {
+        toast.error("Enter a value greater than 0")
+        return
+      }
       const p = expenseLineSchema.safeParse(body)
       if (!p.success) {
         toast.error(p.error.issues.map((i: { message: string }) => i.message).join(" "))
@@ -1933,6 +2195,26 @@ function ExpenseLineFormDialog({
       }
       const r = await createExpenseLine(p.data)
       if (r.ok) {
+        const createdLineId = r.data?.id
+        if (!createdLineId) {
+          toast.error("Line created but its ID was not returned")
+          onOpenChange(false)
+          onSaved()
+          return
+        }
+        const record = await createExpenseRecord({
+          expenseCategoryId: p.data.categoryId,
+          expenseLineId: createdLineId,
+          amount,
+          currency: defaultRecordCurrency,
+          occurredOn: defaultOccurredOn,
+        })
+        if (!record.ok) {
+          toast.error(`Line created, but value could not be posted: ${record.error}`)
+          onOpenChange(false)
+          onSaved()
+          return
+        }
         toast.success("Line created")
         onOpenChange(false)
         onSaved()
@@ -2007,6 +2289,158 @@ function ExpenseLineFormDialog({
                 </FormItem>
               )}
             />
+            {!isEdit ? (
+              <FormField
+                control={form.control}
+                name="initialAmount"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Value ({defaultRecordCurrency})</FormLabel>
+                    <FormControl>
+                      <Input type="number" step="0.01" min="0" placeholder="0.00" {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            ) : null}
+          </form>
+        </Form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function EditExpenseRecordDialog({
+  record,
+  open,
+  onOpenChange,
+  onSaved,
+}: {
+  record: {
+    id: string
+    categoryId: string
+    categoryName: string
+    amount: string
+    currency?: string | null
+    occurredOn: string
+    description: string
+    lineId?: string | null
+    lineName?: string | null
+  }
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  onSaved: () => void
+}) {
+  const form = useForm<z.infer<typeof updateExpenseRecordSchema>>({
+    resolver: zodResolver(updateExpenseRecordSchema),
+    defaultValues: {
+      id: record.id,
+      expenseCategoryId: record.categoryId,
+      expenseLineId: record.lineId ?? undefined,
+      amount: Number(record.amount),
+      currency: (record.currency ?? "AED") as SupportedCurrency,
+      occurredOn: record.occurredOn,
+    },
+  })
+
+  useEffect(() => {
+    if (open) {
+      form.reset({
+        id: record.id,
+        expenseCategoryId: record.categoryId,
+        expenseLineId: record.lineId ?? undefined,
+        amount: Number(record.amount),
+        currency: (record.currency ?? "AED") as SupportedCurrency,
+        occurredOn: record.occurredOn,
+      })
+    }
+  }, [open, record, form])
+
+  async function onSubmit(values: z.infer<typeof updateExpenseRecordSchema>) {
+    const res = await updateExpenseRecord(values)
+    if (res.ok) {
+      toast.success("Manual expense updated")
+      onOpenChange(false)
+      onSaved()
+    } else toast.error(res.error)
+  }
+
+  const formId = `edit-expense-record-${record.id}`
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader className="flex flex-row flex-wrap items-start justify-between gap-2 space-y-0">
+          <div className="min-w-0 flex-1 pr-8">
+            <DialogTitle>Edit manual expense</DialogTitle>
+            <p className="text-muted-foreground mt-1 text-sm">
+              {record.categoryName}
+              {record.lineName ? ` · ${record.lineName}` : ""}
+            </p>
+            <p className="text-muted-foreground truncate text-sm" title={record.description}>
+              {record.description}
+            </p>
+          </div>
+          <Button type="submit" form={formId} size="sm" className="shrink-0">
+            Save
+          </Button>
+        </DialogHeader>
+        <Form {...form}>
+          <form id={formId} onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
+            <input type="hidden" {...form.register("id")} />
+            <input type="hidden" {...form.register("expenseCategoryId")} />
+            <input type="hidden" {...form.register("expenseLineId")} />
+            <FormField
+              control={form.control}
+              name="amount"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Amount</FormLabel>
+                  <FormControl>
+                    <Input type="number" step="0.01" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="currency"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Currency</FormLabel>
+                  <Select onValueChange={field.onChange} value={field.value}>
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {SUPPORTED_CURRENCIES.map((c) => (
+                        <SelectItem key={c} value={c}>
+                          {c}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="occurredOn"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Date</FormLabel>
+                  <FormControl>
+                    <Input type="date" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
           </form>
         </Form>
       </DialogContent>
@@ -2021,7 +2455,7 @@ function ExpenseRecordsDialog({
   onOpenChange,
   onSaved,
 }: {
-  line: { id: string; name: string }
+  line: { id: string; name: string; categoryId: string }
   records: { id: string; amount: string; occurredOn: string; currency?: string | null }[]
   open: boolean
   onOpenChange: (o: boolean) => void
@@ -2030,6 +2464,7 @@ function ExpenseRecordsDialog({
   const addForm = useForm<z.infer<typeof expenseRecordSchema>>({
     resolver: zodResolver(expenseRecordSchema),
     defaultValues: {
+      expenseCategoryId: line.categoryId,
       expenseLineId: line.id,
       amount: 0,
       currency: "AED",
@@ -2040,19 +2475,25 @@ function ExpenseRecordsDialog({
   useEffect(() => {
     if (open) {
       addForm.reset({
+        expenseCategoryId: line.categoryId,
         expenseLineId: line.id,
         amount: 0,
         currency: "AED",
         occurredOn: new Date().toISOString().slice(0, 10),
       })
     }
-  }, [open, line.id, addForm])
+  }, [open, line.id, line.categoryId, addForm])
 
   async function addRec(values: z.infer<typeof expenseRecordSchema>) {
-    const r = await createExpenseRecord({ ...values, expenseLineId: line.id })
+    const r = await createExpenseRecord({
+      ...values,
+      expenseCategoryId: line.categoryId,
+      expenseLineId: line.id,
+    })
     if (r.ok) {
       toast.success("Record added")
       addForm.reset({
+        expenseCategoryId: line.categoryId,
         expenseLineId: line.id,
         amount: 0,
         currency: "AED",
@@ -2122,7 +2563,178 @@ function ExpenseRecordsDialog({
             onSubmit={addForm.handleSubmit(addRec)}
             className="flex flex-wrap gap-2 border-t pt-4"
           >
+            <input type="hidden" {...addForm.register("expenseCategoryId")} />
             <input type="hidden" {...addForm.register("expenseLineId")} />
+            <FormField
+              control={addForm.control}
+              name="amount"
+              render={({ field }) => (
+                <FormItem className="min-w-[100px] flex-1">
+                  <FormLabel>Amount</FormLabel>
+                  <FormControl>
+                    <Input type="number" step="0.01" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={addForm.control}
+              name="currency"
+              render={({ field }) => (
+                <FormItem className="min-w-[100px]">
+                  <FormLabel>CCY</FormLabel>
+                  <Select onValueChange={field.onChange} value={field.value}>
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {SUPPORTED_CURRENCIES.map((c) => (
+                        <SelectItem key={c} value={c}>
+                          {c}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={addForm.control}
+              name="occurredOn"
+              render={({ field }) => (
+                <FormItem className="min-w-[140px]">
+                  <FormLabel>Date</FormLabel>
+                  <FormControl>
+                    <Input type="date" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </form>
+        </Form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function ExpenseCategoryRecordsDialog({
+  category,
+  records,
+  open,
+  onOpenChange,
+  onSaved,
+}: {
+  category: { id: string; name: string }
+  records: { id: string; amount: string; occurredOn: string; currency?: string | null }[]
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  onSaved: () => void
+}) {
+  const addForm = useForm<z.infer<typeof expenseRecordSchema>>({
+    resolver: zodResolver(expenseRecordSchema),
+    defaultValues: {
+      expenseCategoryId: category.id,
+      amount: 0,
+      currency: "AED",
+      occurredOn: new Date().toISOString().slice(0, 10),
+    },
+  })
+
+  useEffect(() => {
+    if (open) {
+      addForm.reset({
+        expenseCategoryId: category.id,
+        amount: 0,
+        currency: "AED",
+        occurredOn: new Date().toISOString().slice(0, 10),
+      })
+    }
+  }, [open, category.id, addForm])
+
+  async function addRec(values: z.infer<typeof expenseRecordSchema>) {
+    const r = await createExpenseRecord({
+      ...values,
+      expenseCategoryId: category.id,
+      expenseLineId: undefined,
+    })
+    if (r.ok) {
+      toast.success("Record added")
+      addForm.reset({
+        expenseCategoryId: category.id,
+        amount: 0,
+        currency: "AED",
+        occurredOn: new Date().toISOString().slice(0, 10),
+      })
+      onSaved()
+    } else toast.error(r.error)
+  }
+
+  const expRecordFormId = `budget-expense-category-record-${category.id}`
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+          <DialogTitle className="min-w-0 flex-1 pr-8">Records — {category.name}</DialogTitle>
+          <Button type="submit" form={expRecordFormId} size="sm" className="shrink-0">
+            Add record
+          </Button>
+        </DialogHeader>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Date</TableHead>
+              <TableHead className="text-right">Amount</TableHead>
+              <TableHead className="w-20" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {records.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={3} className="text-muted-foreground h-14 text-center">
+                  No records.
+                </TableCell>
+              </TableRow>
+            ) : (
+              records.map((r) => (
+                <TableRow key={r.id}>
+                  <TableCell className="font-mono text-xs">{r.occurredOn}</TableCell>
+                  <TableCell className="text-right">
+                    {formatCurrency(Number(r.amount), r.currency ?? "AED")}
+                  </TableCell>
+                  <TableCell>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive"
+                      onClick={async () => {
+                        const res = await deleteExpenseRecord(r.id)
+                        if (res.ok) {
+                          toast.success("Removed")
+                          onSaved()
+                        } else toast.error(res.error)
+                      }}
+                    >
+                      Delete
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+        <Form {...addForm}>
+          <form
+            id={expRecordFormId}
+            onSubmit={addForm.handleSubmit(addRec)}
+            className="flex flex-wrap gap-2 border-t pt-4"
+          >
+            <input type="hidden" {...addForm.register("expenseCategoryId")} />
             <FormField
               control={addForm.control}
               name="amount"

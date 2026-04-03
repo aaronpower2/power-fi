@@ -10,7 +10,7 @@ describe("importMatchResponseSchema", () => {
       {
         staging_id: id,
         kind: "expense",
-        existing_line_id: id,
+        existing_category_id: id,
         confidence: "high",
         notes: null,
       },
@@ -26,6 +26,20 @@ describe("importMatchResponseSchema", () => {
         {
           staging_id: id,
           kind: "expense",
+          confidence: "low",
+        },
+      ]),
+    )
+  })
+
+  it("requires an income line for income rows", () => {
+    const id = "550e8400-e29b-41d4-a716-446655440000"
+    assert.throws(() =>
+      importMatchResponseSchema.parse([
+        {
+          staging_id: id,
+          kind: "income",
+          existing_category_id: id,
           confidence: "low",
         },
       ]),

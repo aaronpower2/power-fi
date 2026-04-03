@@ -176,7 +176,8 @@ export const updateExpenseLineSchema = expenseLineFields.extend({
 })
 
 export const expenseRecordSchema = z.object({
-  expenseLineId: z.string().uuid(),
+  expenseCategoryId: z.string().uuid(),
+  expenseLineId: z.string().uuid().optional(),
   amount: z.coerce.number(),
   currency: supportedCurrencySchema,
   occurredOn: dateStr,

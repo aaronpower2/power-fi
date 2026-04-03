@@ -20,6 +20,7 @@ import {
   allocationTargets,
   assets,
   budgetMonthPlanLines,
+  budgetMonthTransactions,
   expenseCategories,
   expenseLines,
   expenseRecords,
@@ -52,6 +53,22 @@ function groupExpenseRecords(
   const m: Record<string, (typeof expenseRecords.$inferSelect)[]> = {}
   for (const r of rows) {
     const k = r.expenseLineId
+    if (!k) continue
+    if (!m[k]) m[k] = []
+    m[k].push(r)
+  }
+  for (const k of Object.keys(m)) {
+    m[k].sort((a, b) => (a.occurredOn < b.occurredOn ? 1 : -1))
+  }
+  return m
+}
+
+function groupExpenseRecordsByCategory(
+  rows: (typeof expenseRecords.$inferSelect)[],
+): Record<string, (typeof expenseRecords.$inferSelect)[]> {
+  const m: Record<string, (typeof expenseRecords.$inferSelect)[]> = {}
+  for (const r of rows) {
+    const k = r.expenseCategoryId
     if (!m[k]) m[k] = []
     m[k].push(r)
   }
@@ -214,7 +231,22 @@ const empty = {
   incomePlannedByLineNative: {} as LineNativeMonthTotals,
   expenseCategories: [] as (typeof expenseCategories.$inferSelect)[],
   expenseLines: [] as ((typeof expenseLines.$inferSelect) & { categoryName: string })[],
+  expenseTransactionsByCategoryId: {} as Record<
+    string,
+    {
+      id: string
+      occurredOn: string
+      amount: string
+      currency?: string | null
+      description: string
+      lineId?: string | null
+      lineName?: string | null
+      isManual: boolean
+    }[]
+  >,
+  expenseRecordsByCategoryId: {} as Record<string, (typeof expenseRecords.$inferSelect)[]>,
   expenseRecordsByLineId: {} as Record<string, (typeof expenseRecords.$inferSelect)[]>,
+  expenseActualByCategoryNative: {} as LineNativeMonthTotals,
   expenseActualByLineNative: {} as LineNativeMonthTotals,
   expensePlannedByLineNative: {} as LineNativeMonthTotals,
   expensePlannedByCategoryId: {} as Record<string, number>,
@@ -284,6 +316,10 @@ export async function getBudgetPageData(opts?: {
   const linesRaw = await db.select().from(incomeLines)
   const allIncomeRec = await db.select().from(incomeRecords)
   const allExpRec = await db.select().from(expenseRecords)
+  const monthTxRows = await db
+    .select()
+    .from(budgetMonthTransactions)
+    .where(eq(budgetMonthTransactions.periodMonth, start))
 
   const snapshotRows = await db
     .select()
@@ -321,10 +357,19 @@ export async function getBudgetPageData(opts?: {
     }
   }
 
+  const expenseActualByCategoryNative: LineNativeMonthTotals = {}
   const expenseActualByLineNative: LineNativeMonthTotals = {}
   for (const r of allExpRec) {
     if (r.occurredOn >= start && r.occurredOn <= end) {
-      bumpNative(expenseActualByLineNative, r.expenseLineId, r.currency ?? "USD", Number(r.amount))
+      bumpNative(
+        expenseActualByCategoryNative,
+        r.expenseCategoryId,
+        r.currency ?? "USD",
+        Number(r.amount),
+      )
+      if (r.expenseLineId) {
+        bumpNative(expenseActualByLineNative, r.expenseLineId, r.currency ?? "USD", Number(r.amount))
+      }
     }
   }
 
@@ -544,6 +589,50 @@ export async function getBudgetPageData(opts?: {
   })
 
   const expLinesForMonth = expLinesSorted
+  const expenseLedgerByRecordId = new Map(
+    monthTxRows
+      .filter((t) => t.postedExpenseRecordId)
+      .map((t) => [t.postedExpenseRecordId!, t]),
+  )
+  const expenseLineNameById = new Map(expLinesFull.map((l) => [l.id, l.name]))
+  const expenseTransactionsByCategoryId: Record<
+    string,
+    {
+      id: string
+      occurredOn: string
+      amount: string
+      currency?: string | null
+      description: string
+      lineId?: string | null
+      lineName?: string | null
+      isManual: boolean
+    }[]
+  > = {}
+  for (const r of allExpRec) {
+    if (r.occurredOn < start || r.occurredOn > end) continue
+    const tx = expenseLedgerByRecordId.get(r.id)
+    const description =
+      tx?.description ??
+      (r.expenseLineId ? expenseLineNameById.get(r.expenseLineId) ?? "Manual record" : "Manual record")
+    if (!expenseTransactionsByCategoryId[r.expenseCategoryId]) {
+      expenseTransactionsByCategoryId[r.expenseCategoryId] = []
+    }
+    expenseTransactionsByCategoryId[r.expenseCategoryId]!.push({
+      id: r.id,
+      occurredOn: r.occurredOn,
+      amount: r.amount,
+      currency: r.currency,
+      description,
+      lineId: r.expenseLineId ?? null,
+      lineName: r.expenseLineId ? expenseLineNameById.get(r.expenseLineId) ?? null : null,
+      isManual: !tx,
+    })
+  }
+  for (const categoryId of Object.keys(expenseTransactionsByCategoryId)) {
+    expenseTransactionsByCategoryId[categoryId]!.sort((a, b) =>
+      a.occurredOn < b.occurredOn ? 1 : -1,
+    )
+  }
 
   const expensePlannedByCategoryId: Record<string, number> = {}
   for (const c of cats) {
@@ -556,12 +645,17 @@ export async function getBudgetPageData(opts?: {
     })
     if (r.ok) expensePlannedByCategoryId[c.id] = r.total
   }
-  const expenseActualByCategoryId = sumLineMapByCategoryId({
-    lines: expLinesForMonth,
-    lineMap: expenseActualByLineNative,
-    reportingCurrency: summaryCurrency,
-    fx: summaryFxForCategory,
-  })
+  const expenseActualByCategoryId: Record<string, number> = {}
+  for (const c of cats) {
+    const buckets = expenseActualByCategoryNative[c.id]
+    if (!buckets || Object.keys(buckets).length === 0) continue
+    const r = sumNativeLineMapInReportingCurrency({
+      lineMap: { [c.id]: buckets },
+      reportingCurrency: summaryCurrency,
+      fx: summaryFxForCategory,
+    })
+    if (r.ok) expenseActualByCategoryId[c.id] = r.total
+  }
 
   return {
     ym,
@@ -587,7 +681,10 @@ export async function getBudgetPageData(opts?: {
     incomePlannedByLineNative,
     expenseCategories: cats,
     expenseLines: expLinesForMonth,
+    expenseTransactionsByCategoryId,
+    expenseRecordsByCategoryId: groupExpenseRecordsByCategory(allExpRec),
     expenseRecordsByLineId: groupExpenseRecords(allExpRec),
+    expenseActualByCategoryNative,
     expenseActualByLineNative,
     expensePlannedByLineNative,
     expensePlannedByCategoryId,

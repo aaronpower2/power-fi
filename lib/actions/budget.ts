@@ -244,6 +244,7 @@ export async function createExpenseRecord(input: unknown): Promise<ActionResult<
   const [row] = await db
     .insert(expenseRecords)
     .values({
+      expenseCategoryId: v.expenseCategoryId,
       expenseLineId: v.expenseLineId,
       amount: v.amount.toFixed(2),
       currency: v.currency,

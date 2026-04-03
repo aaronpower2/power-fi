@@ -19,7 +19,12 @@ export function PageHeader({
   className?: string
 }) {
   return (
-    <header className={cn("sticky top-0 z-30 shrink-0", className)}>
+    <header
+      className={cn(
+        "sticky top-0 z-30 shrink-0 bg-background",
+        className,
+      )}
+    >
       {/* Solid backing for the whole sticky region (title + gap + toolbar) so nothing shows through */}
       <div className="bg-background flex flex-col gap-3 pb-3">
         <div className="w-full">

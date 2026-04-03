@@ -106,6 +106,7 @@ async function main() {
     .returning()
 
   await db.insert(s.expenseRecords).values({
+    expenseCategoryId: cat.id,
     expenseLineId: exLine.id,
     amount: "8000",
     currency: "AED",

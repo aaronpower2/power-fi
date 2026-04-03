@@ -233,9 +233,10 @@ export const budgetMonthPlanLines = pgTable(
 
 export const expenseRecords = pgTable("expense_records", {
   id: uuid("id").primaryKey().defaultRandom(),
-  expenseLineId: uuid("expense_line_id")
+  expenseCategoryId: uuid("expense_category_id")
     .notNull()
-    .references(() => expenseLines.id, { onDelete: "cascade" }),
+    .references(() => expenseCategories.id, { onDelete: "cascade" }),
+  expenseLineId: uuid("expense_line_id").references(() => expenseLines.id, { onDelete: "set null" }),
   amount: numeric("amount", { precision: 16, scale: 2 }).notNull(),
   currency: varchar("currency", { length: 3 }).notNull().default("USD"),
   occurredOn: date("occurred_on").notNull(),
@@ -290,6 +291,10 @@ export const importedTransactions = pgTable(
     parserRowIndex: integer("parser_row_index").notNull().default(0),
     direction: varchar("direction", { length: 16 }),
     matchStatus: varchar("match_status", { length: 32 }).notNull().default("pending"),
+    suggestedExpenseCategoryId: uuid("suggested_expense_category_id").references(
+      () => expenseCategories.id,
+      { onDelete: "set null" },
+    ),
     suggestedExpenseLineId: uuid("suggested_expense_line_id").references(() => expenseLines.id, {
       onDelete: "set null",
     }),
@@ -328,6 +333,10 @@ export const budgetMonthTransactions = pgTable(
     source: varchar("source", { length: 32 }).notNull().default("import"),
     importedTransactionId: uuid("imported_transaction_id").references(
       () => importedTransactions.id,
+      { onDelete: "set null" },
+    ),
+    suggestedExpenseCategoryId: uuid("suggested_expense_category_id").references(
+      () => expenseCategories.id,
       { onDelete: "set null" },
     ),
     suggestedExpenseLineId: uuid("suggested_expense_line_id").references(() => expenseLines.id, {
