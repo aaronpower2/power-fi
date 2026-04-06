@@ -44,7 +44,8 @@ async function main() {
     .insert(s.assets)
     .values({
       name: "Global stocks",
-      assetType: "Equity",
+      assetCategory: "investment",
+      includeInFiProjection: true,
       growthType: "compound",
       assumedAnnualReturn: "0.07",
       currentBalance: "250000",
@@ -56,7 +57,8 @@ async function main() {
     .insert(s.assets)
     .values({
       name: "Local cash",
-      assetType: "Cash",
+      assetCategory: "cash",
+      includeInFiProjection: true,
       growthType: "compound",
       assumedAnnualReturn: "0.02",
       currentBalance: "150000",

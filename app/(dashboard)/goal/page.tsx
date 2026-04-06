@@ -5,11 +5,16 @@ import { listGoalsWithLifestyle } from "@/lib/data/goals"
 
 export const dynamic = "force-dynamic"
 
-export default async function GoalPage() {
+export default async function GoalPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ ccy?: string }>
+}) {
+  const sp = await searchParams
   const [goalItems, budgetCategoriesForLifestyleCopy, planningData] = await Promise.all([
     listGoalsWithLifestyle(),
     listBudgetCategoriesPlannedForGoalCopy(),
-    getFiPlanPageData(),
+    getFiPlanPageData({ reportingCurrencyRequest: sp.ccy ?? null }),
   ])
 
   return (

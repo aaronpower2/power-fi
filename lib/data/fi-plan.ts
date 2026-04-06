@@ -1,6 +1,10 @@
 import { and, desc, eq, gte, lte } from "drizzle-orm"
 
 import { monthlyPlannedForExpenseCategory } from "@/lib/budget/planned-line"
+import {
+  BUDGET_SUMMARY_CURRENCIES,
+  resolveBudgetSummaryCurrency,
+} from "@/lib/budget/summary-currency"
 import { convertAmount } from "@/lib/currency/convert"
 import { loadRatesOnOrBefore } from "@/lib/currency/rates"
 import { utcIsoDateString, utcMonthRangeStrings } from "@/lib/dates"
@@ -35,6 +39,8 @@ export type SummaryViewModel = {
   assumedWithdrawalRate: number
   chartSeries: ChartPoint[]
   reportingGoalId: string | null
+  /** Active goal FI date (YYYY-MM-DD) for disclosure tooltips. */
+  goalFiDate: string | null
   reportingCurrency: string
   fxAsOfDate: string | null
   fxWarning: string | null
@@ -51,6 +57,7 @@ export type FiPlanPageData = {
   goalOptions: SummaryGoalOption[]
   monthlyInvestable: number | null
   projectedNetWorthAtFi: number | null
+  summaryCurrencyOptions: typeof BUDGET_SUMMARY_CURRENCIES
 }
 
 function emptySummary(): SummaryViewModel {
@@ -63,10 +70,26 @@ function emptySummary(): SummaryViewModel {
     assumedWithdrawalRate: 0.04,
     chartSeries: [],
     reportingGoalId: null,
-    reportingCurrency: "USD",
+    goalFiDate: null,
+    reportingCurrency: "AED",
     fxAsOfDate: null,
     fxWarning: null,
   }
+}
+
+function usesReportingCurrencySwitcher(
+  opts?: { goalId?: string | null; reportingCurrencyRequest?: string | null },
+): boolean {
+  return opts != null && Object.prototype.hasOwnProperty.call(opts, "reportingCurrencyRequest")
+}
+
+function resolveFiReportingCurrency(
+  opts: { goalId?: string | null; reportingCurrencyRequest?: string | null } | undefined,
+  goalCurrency: string,
+): string {
+  return usesReportingCurrencySwitcher(opts)
+    ? resolveBudgetSummaryCurrency(opts!.reportingCurrencyRequest ?? null)
+    : goalCurrency
 }
 
 function pickGoalForSummary(
@@ -125,11 +148,23 @@ function toEngineAssetConverted(a: {
 
 export async function getFiPlanPageData(opts?: {
   goalId?: string | null
+  /**
+   * When this key is present (e.g. FI Summary / portfolio), amounts are converted for display
+   * using the same allowed codes as cash flow / net worth (`resolveBudgetSummaryCurrency`).
+   * When omitted (e.g. Goal settings page), amounts stay in the goal’s currency.
+   */
+  reportingCurrencyRequest?: string | null
 }): Promise<FiPlanPageData> {
   const goalId = opts?.goalId ?? null
   const db = getDb()
   if (!db) {
-    return { summary: emptySummary(), goalOptions: [], monthlyInvestable: null, projectedNetWorthAtFi: null }
+    return {
+      summary: emptySummary(),
+      goalOptions: [],
+      monthlyInvestable: null,
+      projectedNetWorthAtFi: null,
+      summaryCurrencyOptions: BUDGET_SUMMARY_CURRENCIES,
+    }
   }
 
   try {
@@ -151,10 +186,12 @@ export async function getFiPlanPageData(opts?: {
         goalOptions,
         monthlyInvestable: null,
         projectedNetWorthAtFi: null,
+        summaryCurrencyOptions: BUDGET_SUMMARY_CURRENCIES,
       }
     }
 
     const goalCurrency = goal.currency ?? "USD"
+    const reportingCurrency = resolveFiReportingCurrency(opts, goalCurrency)
     const withdrawalRate = Number(goal.withdrawalRate)
     const monthlyFunding = Number(goal.monthlyFundingRequirement)
     const req = requiredPrincipal(monthlyFunding, withdrawalRate)
@@ -174,6 +211,7 @@ export async function getFiPlanPageData(opts?: {
           assumedWithdrawalRate: withdrawalRate,
           chartSeries: [],
           reportingGoalId: goal.id,
+          goalFiDate: goal.fiDate,
           reportingCurrency: goalCurrency,
           fxAsOfDate: null,
           fxWarning:
@@ -182,6 +220,7 @@ export async function getFiPlanPageData(opts?: {
         goalOptions,
         monthlyInvestable: null,
         projectedNetWorthAtFi: null,
+        summaryCurrencyOptions: BUDGET_SUMMARY_CURRENCIES,
       }
     }
 
@@ -209,6 +248,7 @@ export async function getFiPlanPageData(opts?: {
             assumedWithdrawalRate: withdrawalRate,
             chartSeries: [],
             reportingGoalId: goal.id,
+            goalFiDate: goal.fiDate,
             reportingCurrency: goalCurrency,
             fxAsOfDate: fx.asOfDate,
             fxWarning: `Could not convert ${cur} to ${goalCurrency}. Check Frankfurter supports both codes.`,
@@ -216,6 +256,7 @@ export async function getFiPlanPageData(opts?: {
           goalOptions,
           monthlyInvestable: null,
           projectedNetWorthAtFi: null,
+          summaryCurrencyOptions: BUDGET_SUMMARY_CURRENCIES,
         }
       }
       grossAssetsGoal += conv
@@ -238,6 +279,7 @@ export async function getFiPlanPageData(opts?: {
             assumedWithdrawalRate: withdrawalRate,
             chartSeries: [],
             reportingGoalId: goal.id,
+            goalFiDate: goal.fiDate,
             reportingCurrency: goalCurrency,
             fxAsOfDate: fx.asOfDate,
             fxWarning: `Could not convert debt payment from ${currency} to ${goalCurrency}.`,
@@ -245,6 +287,7 @@ export async function getFiPlanPageData(opts?: {
           goalOptions,
           monthlyInvestable: null,
           projectedNetWorthAtFi: null,
+          summaryCurrencyOptions: BUDGET_SUMMARY_CURRENCIES,
         }
       }
       debtPaymentByLiabilityGoal.set(
@@ -271,6 +314,7 @@ export async function getFiPlanPageData(opts?: {
             assumedWithdrawalRate: withdrawalRate,
             chartSeries: [],
             reportingGoalId: goal.id,
+            goalFiDate: goal.fiDate,
             reportingCurrency: goalCurrency,
             fxAsOfDate: fx.asOfDate,
             fxWarning: `Could not convert liability from ${cur} to ${goalCurrency}.`,
@@ -278,6 +322,7 @@ export async function getFiPlanPageData(opts?: {
           goalOptions,
           monthlyInvestable: null,
           projectedNetWorthAtFi: null,
+          summaryCurrencyOptions: BUDGET_SUMMARY_CURRENCIES,
         }
       }
       liabilityStartsGoal.set(L.id, conv)
@@ -296,13 +341,20 @@ export async function getFiPlanPageData(opts?: {
     let allocations: EngineAllocationInput[] = []
     if (strategy) {
       const targets = await db
-        .select()
+        .select({
+          assetId: allocationTargets.assetId,
+          weightPercent: allocationTargets.weightPercent,
+          includeInFi: assets.includeInFiProjection,
+        })
         .from(allocationTargets)
+        .innerJoin(assets, eq(allocationTargets.assetId, assets.id))
         .where(eq(allocationTargets.strategyId, strategy.id))
-      allocations = targets.map((t) => ({
-        assetId: t.assetId,
-        weightPercent: Number(t.weightPercent),
-      }))
+      allocations = targets
+        .filter((t) => t.includeInFi)
+        .map((t) => ({
+          assetId: t.assetId,
+          weightPercent: Number(t.weightPercent),
+        }))
     }
 
     const { start, end } = utcMonthRangeStrings(today)
@@ -330,6 +382,7 @@ export async function getFiPlanPageData(opts?: {
             assumedWithdrawalRate: withdrawalRate,
             chartSeries: [],
             reportingGoalId: goal.id,
+            goalFiDate: goal.fiDate,
             reportingCurrency: goalCurrency,
             fxAsOfDate: fx.asOfDate,
             fxWarning: `Could not convert income from ${cur} to ${goalCurrency}.`,
@@ -337,6 +390,7 @@ export async function getFiPlanPageData(opts?: {
           goalOptions,
           monthlyInvestable: null,
           projectedNetWorthAtFi: null,
+          summaryCurrencyOptions: BUDGET_SUMMARY_CURRENCIES,
         }
       }
       incomeConv += v
@@ -357,6 +411,7 @@ export async function getFiPlanPageData(opts?: {
             assumedWithdrawalRate: withdrawalRate,
             chartSeries: [],
             reportingGoalId: goal.id,
+            goalFiDate: goal.fiDate,
             reportingCurrency: goalCurrency,
             fxAsOfDate: fx.asOfDate,
             fxWarning: `Could not convert expense from ${cur} to ${goalCurrency}.`,
@@ -364,6 +419,7 @@ export async function getFiPlanPageData(opts?: {
           goalOptions,
           monthlyInvestable: null,
           projectedNetWorthAtFi: null,
+          summaryCurrencyOptions: BUDGET_SUMMARY_CURRENCIES,
         }
       }
       expenseConv += v
@@ -372,6 +428,7 @@ export async function getFiPlanPageData(opts?: {
     const monthlyInvestable = Math.max(0, incomeConv - expenseConv)
     const engineAssets: EngineAssetInput[] = []
     for (const a of assetRows) {
+      if (!a.includeInFiProjection) continue
       const cur = a.currency ?? "USD"
       const bal = Number(a.currentBalance ?? 0)
       const balConv = convertAmount(bal, cur, goalCurrency, rates)
@@ -386,6 +443,7 @@ export async function getFiPlanPageData(opts?: {
             assumedWithdrawalRate: withdrawalRate,
             chartSeries: [],
             reportingGoalId: goal.id,
+            goalFiDate: goal.fiDate,
             reportingCurrency: goalCurrency,
             fxAsOfDate: fx.asOfDate,
             fxWarning: `Could not convert asset balance from ${cur}.`,
@@ -393,6 +451,7 @@ export async function getFiPlanPageData(opts?: {
           goalOptions,
           monthlyInvestable: null,
           projectedNetWorthAtFi: null,
+          summaryCurrencyOptions: BUDGET_SUMMARY_CURRENCIES,
         }
       }
       let termConv: number | null = null
@@ -409,6 +468,7 @@ export async function getFiPlanPageData(opts?: {
               assumedWithdrawalRate: withdrawalRate,
               chartSeries: [],
               reportingGoalId: goal.id,
+              goalFiDate: goal.fiDate,
               reportingCurrency: goalCurrency,
               fxAsOfDate: fx.asOfDate,
               fxWarning: `Could not convert terminal value from ${cur}.`,
@@ -416,6 +476,7 @@ export async function getFiPlanPageData(opts?: {
             goalOptions,
             monthlyInvestable: null,
             projectedNetWorthAtFi: null,
+            summaryCurrencyOptions: BUDGET_SUMMARY_CURRENCIES,
           }
         }
       }
@@ -463,23 +524,71 @@ export async function getFiPlanPageData(opts?: {
     const shortfall =
       finiteReq && fundable === false ? fundingShortfall(finalProjectedNet, req) : null
 
+    let displayNetWorth = netWorth
+    let displayShortfall = shortfall
+    let displayRequiredPrincipal = finiteReq ? req : null
+    let displayChart = chartSeries
+    let displayMonthlyInvestable = monthlyInvestable
+    let displayProjectedNet = finalProjectedNet
+    let displayReportingCcy = goalCurrency
+    let displayFxWarning: string | null = null
+
+    if (reportingCurrency !== goalCurrency) {
+      const c = (n: number): number | null => {
+        const v = convertAmount(n, goalCurrency, reportingCurrency, rates)
+        return v == null ? null : v
+      }
+      const convChart = chartSeries.map((p) => {
+        const v = c(p.projectedTotal)
+        return v == null ? null : { label: p.label, projectedTotal: v }
+      })
+      if (convChart.some((p) => p == null)) {
+        displayFxWarning = `Could not convert projection from ${goalCurrency} to ${reportingCurrency}.`
+      } else {
+        const nw = c(netWorth)
+        const rp = finiteReq ? c(req) : null
+        const sf = shortfall != null ? c(shortfall) : null
+        const mi = c(monthlyInvestable)
+        const pn = c(finalProjectedNet)
+        if (
+          nw == null ||
+          (finiteReq && rp == null) ||
+          (shortfall != null && sf == null) ||
+          mi == null ||
+          pn == null
+        ) {
+          displayFxWarning = `Could not convert totals from ${goalCurrency} to ${reportingCurrency}.`
+        } else {
+          displayNetWorth = nw
+          displayShortfall = sf
+          displayRequiredPrincipal = rp
+          displayChart = convChart as ChartPoint[]
+          displayMonthlyInvestable = mi
+          displayProjectedNet = pn
+          displayReportingCcy = reportingCurrency
+        }
+      }
+    }
+
     return {
       summary: {
         goalFundable: fundable,
-        shortfall,
-        netWorth,
+        shortfall: displayShortfall,
+        netWorth: displayNetWorth,
         monthsToFi: monthsFromTodayToFi(today, fiDate),
-        requiredPrincipal: finiteReq ? req : null,
+        requiredPrincipal: displayRequiredPrincipal,
         assumedWithdrawalRate: withdrawalRate,
-        chartSeries,
+        chartSeries: displayChart,
         reportingGoalId: goal.id,
-        reportingCurrency: goalCurrency,
+        goalFiDate: goal.fiDate,
+        reportingCurrency: displayReportingCcy,
         fxAsOfDate: fx.asOfDate,
-        fxWarning: null,
+        fxWarning: displayFxWarning,
       },
       goalOptions,
-      monthlyInvestable,
-      projectedNetWorthAtFi: finalProjectedNet,
+      monthlyInvestable: displayMonthlyInvestable,
+      projectedNetWorthAtFi: displayProjectedNet,
+      summaryCurrencyOptions: BUDGET_SUMMARY_CURRENCIES,
     }
   } catch (e) {
     if (process.env.NODE_ENV === "development") {
@@ -489,7 +598,13 @@ export async function getFiPlanPageData(opts?: {
         console.warn("[getFiPlanPageData]", e)
       }
     }
-    return { summary: emptySummary(), goalOptions: [], monthlyInvestable: null, projectedNetWorthAtFi: null }
+    return {
+      summary: emptySummary(),
+      goalOptions: [],
+      monthlyInvestable: null,
+      projectedNetWorthAtFi: null,
+      summaryCurrencyOptions: BUDGET_SUMMARY_CURRENCIES,
+    }
   }
 }
 

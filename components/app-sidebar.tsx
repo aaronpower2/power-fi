@@ -12,6 +12,8 @@ import {
 
 import { dashboardRoutes } from "@/lib/routes"
 import { SidebarThemeSwitcher } from "@/components/theme-switcher"
+import { signOut } from "@/app/login/actions"
+import { Button } from "@/components/ui/button"
 import {
   Sidebar,
   SidebarContent,
@@ -27,9 +29,9 @@ import {
 
 const nav = [
   { href: dashboardRoutes.fiSummary, label: "FI Summary", icon: LayoutDashboard },
+  { href: dashboardRoutes.netWorth, label: "Net Worth", icon: PieChart },
   { href: dashboardRoutes.cashFlow, label: "Cash Flow", icon: Wallet },
   { href: dashboardRoutes.goal, label: "Goal", icon: Target },
-  { href: dashboardRoutes.netWorth, label: "Net Worth", icon: PieChart },
 ] as const
 
 export function AppSidebar() {
@@ -75,7 +77,17 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
-      <SidebarFooter>
+      <SidebarFooter className="gap-2">
+        <form action={signOut} className="w-full">
+          <Button
+            type="submit"
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground hover:text-foreground h-8 w-full justify-start px-2 text-xs font-normal"
+          >
+            Sign out
+          </Button>
+        </form>
         <SidebarThemeSwitcher />
       </SidebarFooter>
       <SidebarRail />

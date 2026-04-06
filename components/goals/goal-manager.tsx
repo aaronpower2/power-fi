@@ -28,6 +28,7 @@ import {
   type UpdateGoalInput,
 } from "@/lib/validations/goal"
 import { goals } from "@/lib/db/schema"
+import { dashboardRoutes } from "@/lib/routes"
 import { CardHeaderTitleRow, InfoTooltip } from "@/components/info-tooltip"
 import { PageHeader } from "@/components/page-header"
 import { Button } from "@/components/ui/button"
@@ -465,12 +466,51 @@ export function GoalManager({
     <div className="space-y-8">
       <PageHeader
         title="Goal"
-        description="Define the FI destination, required number, and the path from current net worth plus monthly surplus to that target. The active goal drives FI Summary."
+        contentMaxWidth="3xl"
+        description="Set your FI date, lifestyle funding, and withdrawal rate. The active goal powers FI Summary and projections; achievability and status live there."
         controls={
-          <Button size="sm" className="gap-1.5" onClick={() => setCreateDialogOpen(true)}>
-            <Plus className="size-4 shrink-0" aria-hidden />
-            New goal
-          </Button>
+          <div className="flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-muted-foreground min-w-0 flex-1 text-sm">
+              {activeGoal ? (
+                <div className="min-w-0 space-y-0.5">
+                  <p className="text-foreground font-semibold leading-tight">
+                    {formatGoalDisplayName(activeGoal.goal)}
+                  </p>
+                  <p>Active plan for FI Summary and projection outputs.</p>
+                </div>
+              ) : (
+                <p className="leading-snug">
+                  No active goal yet — mark one below to power FI Summary and projections.
+                </p>
+              )}
+            </div>
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+              <div
+                className="bg-muted/40 inline-flex rounded-lg border p-0.5"
+                role="group"
+                aria-label="Reporting currency for projection snapshot"
+              >
+                {planningData.summaryCurrencyOptions.map((code) => (
+                  <Button
+                    key={code}
+                    type="button"
+                    size="sm"
+                    variant={planningData.summary.reportingCurrency === code ? "secondary" : "ghost"}
+                    className="h-7 min-w-12 px-2.5 text-xs font-medium"
+                    onClick={() => {
+                      router.push(`${dashboardRoutes.goal}?ccy=${encodeURIComponent(code)}`)
+                    }}
+                  >
+                    {code}
+                  </Button>
+                ))}
+              </div>
+              <Button size="sm" className="gap-1.5" onClick={() => setCreateDialogOpen(true)}>
+                <Plus className="size-4 shrink-0" aria-hidden />
+                New goal
+              </Button>
+            </div>
+          </div>
         }
       />
 
@@ -481,64 +521,27 @@ export function GoalManager({
       ) : null}
 
       {activeGoal ? (
-        <div className="space-y-4">
-          <div>
-            <p className="text-sm font-semibold">{formatGoalDisplayName(activeGoal.goal)}</p>
-            <p className="text-muted-foreground text-sm">
-              Active plan for FI Summary and projection outputs.
-            </p>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <GoalPlanMetric
-              title="Status"
-              value={
-                planningData.summary.goalFundable == null
-                  ? "—"
-                  : planningData.summary.goalFundable
-                    ? "On track"
-                    : "Gap"
-              }
-              detail={
-                planningData.summary.shortfall != null
-                  ? `${formatCurrency(
-                      planningData.summary.shortfall,
-                      planningData.summary.reportingCurrency,
-                      { maximumFractionDigits: 0 },
-                    )} below target`
-                  : undefined
-              }
-            />
-            <GoalPlanMetric
-              title="Required FI number"
-              value={formatCurrency(
-                planningData.summary.requiredPrincipal ?? null,
-                planningData.summary.reportingCurrency,
-                {
-                  maximumFractionDigits: 0,
-                },
-              )}
-            />
-            <GoalPlanMetric
-              title="Projected at FI date"
-              value={formatCurrency(
-                planningData.projectedNetWorthAtFi ?? null,
-                planningData.summary.reportingCurrency,
-                {
-                  maximumFractionDigits: 0,
-                },
-              )}
-            />
-            <GoalPlanMetric
-              title="Monthly investable"
-              value={formatCurrency(
-                planningData.monthlyInvestable ?? null,
-                planningData.summary.reportingCurrency,
-                {
-                  maximumFractionDigits: 0,
-                },
-              )}
-            />
-          </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <GoalPlanMetric
+            title="Required FI number"
+            value={formatCurrency(
+              planningData.summary.requiredPrincipal ?? null,
+              planningData.summary.reportingCurrency,
+              {
+                maximumFractionDigits: 0,
+              },
+            )}
+          />
+          <GoalPlanMetric
+            title="Projected at FI date"
+            value={formatCurrency(
+              planningData.projectedNetWorthAtFi ?? null,
+              planningData.summary.reportingCurrency,
+              {
+                maximumFractionDigits: 0,
+              },
+            )}
+          />
         </div>
       ) : null}
 

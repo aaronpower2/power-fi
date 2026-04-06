@@ -2,6 +2,7 @@ import { z } from "zod"
 
 import { BUDGET_SUMMARY_CURRENCIES } from "@/lib/budget/summary-currency"
 import { supportedCurrencySchema } from "@/lib/currency/iso4217"
+import { assetCategorySchema } from "@/lib/portfolio/asset-category"
 
 const budgetSummaryCurrencySchema = z.enum(BUDGET_SUMMARY_CURRENCIES)
 export const LIABILITY_TRACKING_MODES = ["fixed_installment", "revolving"] as const
@@ -24,9 +25,26 @@ const assetMetaSchema = z
   })
   .optional()
 
+/** Optional loan secured by this asset (create / upsert). */
+export const securedLiabilityPayloadSchema = z.object({
+  name: z.string().min(1).max(256),
+  liabilityType: z
+    .string()
+    .max(128)
+    .optional()
+    .transform((s) => {
+      const t = s?.trim()
+      return t === "" || t == null ? undefined : t
+    }),
+  currency: supportedCurrencySchema,
+  trackingMode: liabilityTrackingModeSchema,
+  currentBalance: z.coerce.number().min(0),
+})
+
 const assetObject = z.object({
   name: z.string().min(1).max(256),
-  assetType: z.string().min(1).max(128),
+  assetCategory: assetCategorySchema,
+  includeInFiProjection: z.coerce.boolean(),
   currency: supportedCurrencySchema,
   growthType: z.enum(["compound", "capital"]),
   assumedAnnualReturnPercent: z.coerce.number().optional(),
@@ -34,10 +52,17 @@ const assetObject = z.object({
   maturationDate: dateOpt,
   currentBalance: z.coerce.number().min(0),
   meta: assetMetaSchema,
+  /** When set, creates a liability with `securedByAssetId` after the asset exists. */
+  securedLiability: securedLiabilityPayloadSchema.optional(),
 })
 
-function refineAsset<T extends z.infer<typeof assetObject>>(
-  data: T,
+function refineAssetGrowth(
+  data: {
+    growthType: "compound" | "capital"
+    assumedAnnualReturnPercent?: number
+    assumedTerminalValue?: number
+    maturationDate?: string
+  },
   ctx: z.RefinementCtx,
 ) {
   if (data.growthType === "compound") {
@@ -70,11 +95,21 @@ function refineAsset<T extends z.infer<typeof assetObject>>(
   }
 }
 
-export const createAssetSchema = assetObject.superRefine(refineAsset)
+export const createAssetSchema = assetObject.superRefine(refineAssetGrowth)
 
-export const updateAssetSchema = assetObject
-  .extend({ id: z.string().uuid() })
-  .superRefine(refineAsset)
+const updateAssetObject = assetObject
+  .omit({ securedLiability: true })
+  .extend({
+    id: z.string().uuid(),
+    /**
+     * Omitted: leave linked loan unchanged.
+     * null: remove secured liability for this asset (if any).
+     * object: create or update the single secured liability.
+     */
+    securedLiability: securedLiabilityPayloadSchema.nullish(),
+  })
+
+export const updateAssetSchema = updateAssetObject.superRefine(refineAssetGrowth)
 
 export const strategyNameSchema = z.object({
   name: z.string().min(1).max(256),

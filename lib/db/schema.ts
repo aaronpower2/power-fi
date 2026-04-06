@@ -18,6 +18,16 @@ import {
 
 export const growthTypeEnum = pgEnum("growth_type", ["compound", "capital"])
 
+export const assetCategoryEnum = pgEnum("asset_category", [
+  "investment",
+  "cash",
+  "real_estate_primary",
+  "real_estate_rental",
+  "vehicle",
+  "depreciating_other",
+  "other",
+])
+
 export const goals = pgTable("goals", {
   id: uuid("id").primaryKey().defaultRandom(),
   /** User-defined label; lists fall back to FI date · currency when unset. */
@@ -48,7 +58,9 @@ export const goalLifestyleLines = pgTable("goal_lifestyle_lines", {
 export const assets = pgTable("assets", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: varchar("name", { length: 256 }).notNull(),
-  assetType: varchar("asset_type", { length: 128 }).notNull(),
+  assetCategory: assetCategoryEnum("asset_category").notNull().default("investment"),
+  /** When false, asset counts toward net worth but is excluded from FI projection / allocation targets. */
+  includeInFiProjection: boolean("include_in_fi_projection").notNull().default(true),
   growthType: growthTypeEnum("growth_type").notNull(),
   assumedAnnualReturn: numeric("assumed_annual_return", { precision: 10, scale: 6 }),
   assumedTerminalValue: numeric("assumed_terminal_value", { precision: 16, scale: 2 }),

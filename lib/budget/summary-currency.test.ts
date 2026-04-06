@@ -5,17 +5,15 @@ import { resolveBudgetSummaryCurrency } from "@/lib/budget/summary-currency"
 
 describe("resolveBudgetSummaryCurrency", () => {
   it("uses requested code when allowed", () => {
-    assert.equal(resolveBudgetSummaryCurrency("aed", "USD"), "AED")
-    assert.equal(resolveBudgetSummaryCurrency("NZD", "USD"), "NZD")
+    assert.equal(resolveBudgetSummaryCurrency("aed"), "AED")
+    assert.equal(resolveBudgetSummaryCurrency("NZD"), "NZD")
+    assert.equal(resolveBudgetSummaryCurrency("AUD"), "AUD")
   })
 
-  it("falls back to goal when request invalid", () => {
-    assert.equal(resolveBudgetSummaryCurrency("USD", "AUD"), "AUD")
-    assert.equal(resolveBudgetSummaryCurrency(null, "NZD"), "NZD")
-  })
-
-  it("defaults to AED when neither applies", () => {
-    assert.equal(resolveBudgetSummaryCurrency(null, "USD"), "AED")
-    assert.equal(resolveBudgetSummaryCurrency("EUR", "GBP"), "AED")
+  it("defaults to AED when request missing or not in allowed set", () => {
+    assert.equal(resolveBudgetSummaryCurrency(null), "AED")
+    assert.equal(resolveBudgetSummaryCurrency(undefined), "AED")
+    assert.equal(resolveBudgetSummaryCurrency("USD"), "AED")
+    assert.equal(resolveBudgetSummaryCurrency("EUR"), "AED")
   })
 })

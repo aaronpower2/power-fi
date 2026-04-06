@@ -2,11 +2,12 @@
 
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useRouter } from "next/navigation"
-import { useEffect, useId, useMemo, useState } from "react"
+import { Fragment, useEffect, useId, useMemo, useState } from "react"
 import {
   useForm,
   type Control,
   type FieldValues,
+  type Resolver,
 } from "react-hook-form"
 import { toast } from "sonner"
 import type { z } from "zod"
@@ -40,6 +41,13 @@ import {
   updateStrategySchema,
   type UpdateAssetInput,
 } from "@/lib/validations/portfolio"
+import {
+  ASSET_CATEGORY_GROUP_HEADINGS,
+  ASSET_CATEGORY_LABELS,
+  ASSET_CATEGORY_VALUES,
+  defaultIncludeInFi,
+  type AssetCategory,
+} from "@/lib/portfolio/asset-category"
 import { parseAssetMeta } from "@/lib/types/asset-meta"
 import { SUPPORTED_CURRENCIES } from "@/lib/currency/iso4217"
 import {
@@ -128,6 +136,18 @@ type CreateAssetForm = z.infer<typeof createAssetSchema>
 type CreateLiabilityForm = z.input<typeof createLiabilitySchema>
 type UpdateLiabilityInput = z.input<typeof updateLiabilitySchema>
 
+type SecuredRow = PortfolioPayload["securedLiabilityByAssetId"][string]
+
+const ASSET_TABLE_CATEGORY_ORDER: AssetCategory[] = [
+  "investment",
+  "cash",
+  "real_estate_rental",
+  "real_estate_primary",
+  "vehicle",
+  "depreciating_other",
+  "other",
+]
+
 const portfolioTabTriggerCn =
   "relative inline-flex h-[calc(100%-1px)] flex-1 items-center justify-center gap-1.5 rounded-md border border-transparent px-1.5 py-0.5 text-sm font-medium whitespace-nowrap transition-all focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
 
@@ -182,7 +202,24 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
     fiDateLabel,
     portfolioFxWarning,
     fxAsOfDate,
+    securedLiabilityByAssetId,
   } = data
+
+  const assetsGrouped = useMemo(() => {
+    const by = new Map<AssetCategory, AssetRow[]>()
+    for (const c of ASSET_CATEGORY_VALUES) {
+      by.set(c, [])
+    }
+    for (const a of assets) {
+      const cat = (a.assetCategory ?? "other") as AssetCategory
+      const list = by.get(cat)
+      if (list) list.push(a)
+    }
+    return ASSET_TABLE_CATEGORY_ORDER.filter((c) => (by.get(c)?.length ?? 0) > 0).map((c) => ({
+      category: c,
+      items: by.get(c) ?? [],
+    }))
+  }, [assets])
 
   const targetSum = useMemo(
     () => targets.reduce((s, t) => s + Number(t.weightPercent), 0),
@@ -370,12 +407,25 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
 
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-base font-medium">Projected total by year</CardTitle>
-            <p className="text-muted-foreground text-xs">
-              Net worth path after projected liabilities; gross asset model through FI
-              {fiDateLabel ? ` (${fiDateLabel})` : ""}
-              {fxAsOfDate ? ` · FX ${fxAsOfDate}` : ""}
-            </p>
+            <CardHeaderTitleRow
+              title={<CardTitle className="text-base font-medium">Projected total by year</CardTitle>}
+              info={
+                <>
+                  <p>
+                    FI-scoped path: assets marked &quot;in FI plan&quot; plus monthly investable, minus
+                    projected liabilities. Full balance-sheet net worth is in the cards above and on FI
+                    Summary.
+                  </p>
+                  {(fiDateLabel || fxAsOfDate) && (
+                    <p className="text-muted-foreground mt-2">
+                      {[fiDateLabel ? `FI ${fiDateLabel}` : null, fxAsOfDate ? `FX ${fxAsOfDate}` : null]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </p>
+                  )}
+                </>
+              }
+            />
           </CardHeader>
           <CardContent>
             <PortfolioYearlyBarChart
@@ -397,6 +447,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
       >
         <EditAssetDialog
           asset={assetToEdit}
+          secured={assetToEdit ? securedLiabilityByAssetId[assetToEdit.id] : undefined}
           open={!!assetToEdit}
           onOpenChange={(o) => {
             if (!o) setAssetToEdit(null)
@@ -421,7 +472,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
           <CardHeader>
             <CardHeaderTitleRow
               title={<CardTitle>Assets</CardTitle>}
-              info="Compound growth uses an annual return (%). Capital growth uses a terminal value and maturation date. Allocation records track capital you add to each line (like budget line records). Realized market performance is not auto-imported: edit the asset and update Current balance when you reconcile, or plan periodic snapshots if we add a dedicated valuation history later."
+              info="Rows are grouped by category (set when you edit an asset). “In FI plan” includes the asset in FI Summary and strategy targets. Growth: compound (annual %) vs capital (terminal value + date). Secured loans are edited on the asset; reconcile by updating balance."
             />
           </CardHeader>
           <CardContent>
@@ -429,7 +480,9 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
               <TableHeader>
                 <TableRow>
                   <TableHead>Name</TableHead>
-                  <TableHead>Type</TableHead>
+                  <TableHead className="text-center" title="In FI plan (Summary + strategy)">
+                    FI
+                  </TableHead>
                   <TableHead>CCY</TableHead>
                   <TableHead>Growth</TableHead>
                   <TableHead className="text-right">Allocated</TableHead>
@@ -445,93 +498,123 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                     </TableCell>
                   </TableRow>
                 ) : (
-                  assets.map((a) => {
-                    const recs = allocationRecordsByAssetId[a.id] ?? []
-                    const allocated = recs.reduce((s, r) => s + Number(r.amount), 0)
-                    const link = parseAssetMeta(a.meta).linkToManage
-                    return (
-                      <TableRow key={a.id}>
-                        <TableCell className="font-medium">
-                          <div
-                            className="flex items-center gap-1.5"
-                            title={link?.credentialsHint || undefined}
-                          >
-                            <span>{a.name}</span>
-                            {link?.url ? (
-                              <a
-                                href={link.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-muted-foreground hover:text-foreground inline-flex shrink-0"
-                                aria-label={
-                                  link.label
-                                    ? `Open ${link.label}`
-                                    : "Open link to manage"
-                                }
-                                title={link.label ?? "Manage externally"}
-                              >
-                                <ExternalLink className="size-3.5" />
-                              </a>
-                            ) : null}
-                          </div>
-                          {link?.label && !link.url ? (
-                            <div className="text-muted-foreground mt-0.5 text-xs">{link.label}</div>
-                          ) : null}
-                        </TableCell>
-                        <TableCell>{a.assetType}</TableCell>
-                        <TableCell className="font-mono text-xs">{a.currency ?? "USD"}</TableCell>
-                        <TableCell className="capitalize">{a.growthType}</TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {formatCurrency(allocated, a.currency ?? "USD")}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {formatCurrency(
-                            Number(a.currentBalance),
-                            a.currency ?? "USD",
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button variant="ghost" size="icon-sm" aria-label="Actions">
-                                <MoreHorizontal />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end">
-                              <DropdownMenuItem
-                                onSelect={(e) => {
-                                  e.preventDefault()
-                                  setAssetForRecords(a)
-                                }}
-                              >
-                                <ClipboardList className="size-4 opacity-70" />
-                                Records
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                onSelect={(e) => {
-                                  e.preventDefault()
-                                  setAssetToEdit(a)
-                                }}
-                              >
-                                <Pencil className="size-4 opacity-70" />
-                                Edit
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                variant="destructive"
-                                onSelect={(e) => {
-                                  e.preventDefault()
-                                  setPendingDeleteAsset(a.id)
-                                }}
-                              >
-                                <Trash2 className="size-4 opacity-70" />
-                                Delete
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
+                  assetsGrouped.map(({ category, items }) => (
+                    <Fragment key={category}>
+                      <TableRow className="bg-muted/30 hover:bg-muted/30">
+                        <TableCell
+                          colSpan={7}
+                          className="text-muted-foreground py-2 text-xs font-semibold"
+                        >
+                          {ASSET_CATEGORY_GROUP_HEADINGS[category]}
                         </TableCell>
                       </TableRow>
-                    )
-                  })
+                      {items.map((a) => {
+                        const recs = allocationRecordsByAssetId[a.id] ?? []
+                        const allocated = recs.reduce((s, r) => s + Number(r.amount), 0)
+                        const link = parseAssetMeta(a.meta).linkToManage
+                        return (
+                          <TableRow key={a.id}>
+                            <TableCell className="font-medium">
+                              <div
+                                className="flex items-center gap-1.5"
+                                title={link?.credentialsHint || undefined}
+                              >
+                                <span>{a.name}</span>
+                                {link?.url ? (
+                                  <a
+                                    href={link.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-muted-foreground hover:text-foreground inline-flex shrink-0"
+                                    aria-label={
+                                      link.label
+                                        ? `Open ${link.label}`
+                                        : "Open link to manage"
+                                    }
+                                    title={link.label ?? "Manage externally"}
+                                  >
+                                    <ExternalLink className="size-3.5" />
+                                  </a>
+                                ) : null}
+                              </div>
+                              {link?.label && !link.url ? (
+                                <div className="text-muted-foreground mt-0.5 max-w-[16rem] truncate text-[11px]">
+                                  {link.label}
+                                </div>
+                              ) : null}
+                            </TableCell>
+                            <TableCell className="text-center">
+                              <span
+                                className={cn(
+                                  "inline-block min-w-[1.25rem] text-xs font-medium tabular-nums",
+                                  a.includeInFiProjection ? "text-foreground" : "text-muted-foreground",
+                                )}
+                                title={
+                                  a.includeInFiProjection
+                                    ? "In FI plan (Summary + strategy)"
+                                    : "Out of FI plan"
+                                }
+                              >
+                                {a.includeInFiProjection ? "Y" : "—"}
+                              </span>
+                            </TableCell>
+                            <TableCell className="font-mono text-xs">{a.currency ?? "USD"}</TableCell>
+                            <TableCell className="text-muted-foreground text-xs">
+                              {a.growthType === "compound" ? "Comp." : "Cap."}
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums">
+                              {formatCurrency(allocated, a.currency ?? "USD")}
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums">
+                              {formatCurrency(
+                                Number(a.currentBalance),
+                                a.currency ?? "USD",
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button variant="ghost" size="icon-sm" aria-label="Actions">
+                                    <MoreHorizontal />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    onSelect={(e) => {
+                                      e.preventDefault()
+                                      setAssetForRecords(a)
+                                    }}
+                                  >
+                                    <ClipboardList className="size-4 opacity-70" />
+                                    Records
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onSelect={(e) => {
+                                      e.preventDefault()
+                                      setAssetToEdit(a)
+                                    }}
+                                  >
+                                    <Pencil className="size-4 opacity-70" />
+                                    Edit
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    variant="destructive"
+                                    onSelect={(e) => {
+                                      e.preventDefault()
+                                      setPendingDeleteAsset(a.id)
+                                    }}
+                                  >
+                                    <Trash2 className="size-4 opacity-70" />
+                                    Delete
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </TableCell>
+                          </TableRow>
+                        )
+                      })}
+                    </Fragment>
+                  ))
                 )}
               </TableBody>
             </Table>
@@ -564,7 +647,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
           <CardHeader>
             <CardHeaderTitleRow
               title={<CardTitle>Liabilities</CardTitle>}
-              info="Track what you still owe. Fixed-installment liabilities can decline through linked debt-payment categories in Cash Flow; revolving balances stay manual unless you update them here."
+              info="Track what you still owe. Loans tied to an asset are usually edited from that asset’s dialog. Fixed-installment rows can decline via linked debt-payment categories in Cash Flow; revolving balances stay manual unless you update them here."
             />
           </CardHeader>
           <CardContent>
@@ -1246,12 +1329,13 @@ function EditLiabilityDialog({
   )
 }
 
-function assetToFormValues(asset: AssetRow): UpdateAssetInput {
+function assetToFormValues(asset: AssetRow, secured: SecuredRow | undefined): UpdateAssetInput {
   const m = parseAssetMeta(asset.meta)
   return {
     id: asset.id,
     name: asset.name,
-    assetType: asset.assetType,
+    assetCategory: asset.assetCategory,
+    includeInFiProjection: asset.includeInFiProjection,
     currency: (asset.currency ?? "USD") as UpdateAssetInput["currency"],
     growthType: asset.growthType,
     assumedAnnualReturnPercent: asset.assumedAnnualReturn
@@ -1269,6 +1353,15 @@ function assetToFormValues(asset: AssetRow): UpdateAssetInput {
         credentialsHint: m.linkToManage?.credentialsHint ?? "",
       },
     },
+    securedLiability: secured
+      ? {
+          name: secured.name,
+          liabilityType: secured.liabilityType ?? "",
+          currency: secured.currency as UpdateAssetInput["currency"],
+          trackingMode: secured.trackingMode as "fixed_installment" | "revolving",
+          currentBalance: Number(secured.currentBalance),
+        }
+      : undefined,
   }
 }
 
@@ -1330,10 +1423,22 @@ function AllocationRecordsDialog({
               Log capital you move into this asset (contributions). Amounts are in the asset’s currency.
             </InfoTooltip>
           </div>
-          <Button type="submit" form={allocRecordFormId} size="sm" className="shrink-0">
+          <Button
+            type="submit"
+            form={allocRecordFormId}
+            size="sm"
+            className="shrink-0"
+            disabled={!asset.includeInFiProjection}
+          >
             Add record
           </Button>
         </DialogHeader>
+        {!asset.includeInFiProjection ? (
+          <p className="text-muted-foreground text-xs">
+            This asset is not in your FI plan — allocation records cannot be added (remove old rows if
+            needed).
+          </p>
+        ) : null}
         <Table>
           <TableHeader>
             <TableRow>
@@ -1417,40 +1522,73 @@ function AllocationRecordsDialog({
   )
 }
 
+const createAssetFormDefaults: CreateAssetForm = {
+  name: "",
+  assetCategory: "investment",
+  includeInFiProjection: true,
+  currency: "USD",
+  growthType: "compound",
+  assumedAnnualReturnPercent: 7,
+  currentBalance: 0,
+  meta: {
+    linkToManage: { url: "", label: "", credentialsHint: "" },
+  },
+}
+
 function AddAssetDialog({ onSaved }: { onSaved: () => void }) {
   const [open, setOpen] = useState(false)
+  const [loanLinked, setLoanLinked] = useState(false)
+  const [customizeFi, setCustomizeFi] = useState(false)
   const form = useForm<CreateAssetForm>({
-    resolver: zodResolver(createAssetSchema),
-    defaultValues: {
-      name: "",
-      assetType: "Equity",
-      currency: "USD",
-      growthType: "compound",
-      assumedAnnualReturnPercent: 7,
-      currentBalance: 0,
-      meta: {
-        linkToManage: { url: "", label: "", credentialsHint: "" },
-      },
-    },
+    resolver: zodResolver(createAssetSchema) as Resolver<CreateAssetForm>,
+    defaultValues: createAssetFormDefaults,
   })
   const growthType = form.watch("growthType")
+  const assetCategory = form.watch("assetCategory")
+
+  useEffect(() => {
+    if (!customizeFi) {
+      form.setValue("includeInFiProjection", defaultIncludeInFi(assetCategory as AssetCategory))
+    }
+  }, [assetCategory, customizeFi, form])
+
+  useEffect(() => {
+    if (loanLinked) {
+      const ccy = form.getValues("currency") ?? "USD"
+      form.setValue("securedLiability", {
+        name: "",
+        liabilityType: "",
+        currency: ccy as CreateAssetForm["currency"],
+        trackingMode: "fixed_installment",
+        currentBalance: 0,
+      })
+    } else {
+      form.setValue("securedLiability", undefined)
+    }
+  }, [loanLinked, form])
 
   async function onSubmit(values: CreateAssetForm) {
-    const r = await createAsset(values)
+    if (loanLinked) {
+      const sl = values.securedLiability
+      if (!sl?.name?.trim()) {
+        toast.error("Loan name is required when linking a loan.")
+        return
+      }
+    }
+    const payload: CreateAssetForm = {
+      ...values,
+      securedLiability:
+        loanLinked && values.securedLiability?.name?.trim()
+          ? values.securedLiability
+          : undefined,
+    }
+    const r = await createAsset(payload)
     if (r.ok) {
       toast.success("Asset created")
       setOpen(false)
-      form.reset({
-        name: "",
-        assetType: "Equity",
-        currency: "USD",
-        growthType: "compound",
-        assumedAnnualReturnPercent: 7,
-        currentBalance: 0,
-        meta: {
-          linkToManage: { url: "", label: "", credentialsHint: "" },
-        },
-      })
+      setLoanLinked(false)
+      setCustomizeFi(false)
+      form.reset(createAssetFormDefaults)
       onSaved()
     } else toast.error(r.error)
   }
@@ -1467,7 +1605,7 @@ function AddAssetDialog({ onSaved }: { onSaved: () => void }) {
         <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
           <div className="flex min-w-0 flex-1 items-center gap-1.5 pr-8">
             <DialogTitle>New asset</DialogTitle>
-            <InfoTooltip>Balances and assumptions feed the projection engine.</InfoTooltip>
+            <InfoTooltip>Category sets defaults; FI inclusion controls Summary and strategy targets.</InfoTooltip>
           </div>
           <Button type="submit" form="portfolio-asset-create" size="sm" className="shrink-0">
             Create
@@ -1478,6 +1616,11 @@ function AddAssetDialog({ onSaved }: { onSaved: () => void }) {
             <AssetFormFields
               control={form.control as unknown as Control<FieldValues>}
               growthType={growthType}
+              variant="create"
+              loanLinked={loanLinked}
+              setLoanLinked={setLoanLinked}
+              customizeFi={customizeFi}
+              setCustomizeFi={setCustomizeFi}
             />
           </form>
         </Form>
@@ -1488,29 +1631,68 @@ function AddAssetDialog({ onSaved }: { onSaved: () => void }) {
 
 function EditAssetDialog({
   asset,
+  secured,
   open,
   onOpenChange,
   onSaved,
 }: {
   asset: AssetRow | null
+  secured?: SecuredRow
   open: boolean
   onOpenChange: (open: boolean) => void
   onSaved: () => void
 }) {
+  const [loanLinked, setLoanLinked] = useState(false)
   const form = useForm<UpdateAssetInput>({
-    resolver: zodResolver(updateAssetSchema),
-    defaultValues: asset ? assetToFormValues(asset) : undefined,
+    resolver: zodResolver(updateAssetSchema) as Resolver<UpdateAssetInput>,
+    defaultValues: asset ? assetToFormValues(asset, secured) : undefined,
   })
   const growthType = form.watch("growthType")
 
   useEffect(() => {
     if (asset && open) {
-      form.reset(assetToFormValues(asset))
+      setLoanLinked(!!secured)
+      form.reset(assetToFormValues(asset, secured))
     }
-  }, [asset, open, form])
+  }, [asset, secured, open, form])
+
+  useEffect(() => {
+    if (!asset || !open) return
+    if (loanLinked) {
+      const ccy = form.getValues("currency") ?? "USD"
+      const cur = form.getValues("securedLiability")
+      if (!cur) {
+        form.setValue("securedLiability", {
+          name: "",
+          liabilityType: "",
+          currency: ccy as UpdateAssetInput["currency"],
+          trackingMode: "fixed_installment",
+          currentBalance: 0,
+        })
+      }
+    } else {
+      form.setValue("securedLiability", undefined)
+    }
+  }, [loanLinked, asset, open, form])
 
   async function onSubmit(values: UpdateAssetInput) {
-    const r = await updateAsset(values)
+    const had = !!secured
+    if (loanLinked) {
+      const sl = values.securedLiability
+      if (!sl?.name?.trim()) {
+        toast.error("Loan name is required when linking a loan.")
+        return
+      }
+    }
+    let securedLiability: UpdateAssetInput["securedLiability"]
+    if (had) {
+      securedLiability = loanLinked ? values.securedLiability : null
+    } else if (loanLinked && values.securedLiability?.name?.trim()) {
+      securedLiability = values.securedLiability
+    } else {
+      securedLiability = undefined
+    }
+    const r = await updateAsset({ ...values, securedLiability })
     if (r.ok) {
       toast.success("Asset updated")
       onOpenChange(false)
@@ -1526,7 +1708,7 @@ function EditAssetDialog({
         <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
           <div className="flex min-w-0 flex-1 items-center gap-1.5 pr-8">
             <DialogTitle>Edit asset</DialogTitle>
-            <InfoTooltip>Balances and assumptions feed the projection engine.</InfoTooltip>
+            <InfoTooltip>FI inclusion and linked loans update Net Worth and Cash Flow behavior.</InfoTooltip>
           </div>
           <Button type="submit" form="portfolio-asset-edit" size="sm" className="shrink-0">
             Save
@@ -1538,6 +1720,11 @@ function EditAssetDialog({
             <AssetFormFields
               control={form.control as unknown as Control<FieldValues>}
               growthType={growthType}
+              variant="edit"
+              loanLinked={loanLinked}
+              setLoanLinked={setLoanLinked}
+              customizeFi={false}
+              setCustomizeFi={() => {}}
             />
           </form>
         </Form>
@@ -1549,9 +1736,19 @@ function EditAssetDialog({
 function AssetFormFields({
   control,
   growthType,
+  variant,
+  loanLinked,
+  setLoanLinked,
+  customizeFi,
+  setCustomizeFi,
 }: {
   control: Control<FieldValues>
   growthType: "compound" | "capital"
+  variant: "create" | "edit"
+  loanLinked: boolean
+  setLoanLinked: (v: boolean) => void
+  customizeFi: boolean
+  setCustomizeFi: (v: boolean) => void
 }) {
   return (
     <>
@@ -1570,14 +1767,61 @@ function AssetFormFields({
       />
       <FormField
         control={control}
-        name="assetType"
+        name="assetCategory"
         render={({ field }) => (
           <FormItem>
-            <FormLabel>Asset type</FormLabel>
-            <FormControl>
-              <Input placeholder="Equity, Real estate…" {...field} />
-            </FormControl>
+            <FormLabel>Category</FormLabel>
+            <Select onValueChange={field.onChange} value={field.value}>
+              <FormControl>
+                <SelectTrigger>
+                  <SelectValue placeholder="Choose category" />
+                </SelectTrigger>
+              </FormControl>
+              <SelectContent>
+                {ASSET_CATEGORY_VALUES.map((c) => (
+                  <SelectItem key={c} value={c}>
+                    {ASSET_CATEGORY_LABELS[c]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <FormMessage />
+          </FormItem>
+        )}
+      />
+      {variant === "create" ? (
+        <label className="flex cursor-pointer items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={customizeFi}
+            onChange={(e) => setCustomizeFi(e.target.checked)}
+          />
+          <span className="text-muted-foreground leading-snug">
+            Customize “in FI plan” (stop syncing from category when you change category)
+          </span>
+        </label>
+      ) : null}
+      <FormField
+        control={control}
+        name="includeInFiProjection"
+        render={({ field }) => (
+          <FormItem className="flex flex-row items-start gap-2 space-y-0">
+            <FormControl>
+              <input
+                type="checkbox"
+                className="mt-1"
+                checked={field.value}
+                onChange={field.onChange}
+              />
+            </FormControl>
+            <div className="space-y-1">
+              <FormLabel className="font-normal">Include in FI plan &amp; strategy targets</FormLabel>
+              <p className="text-muted-foreground text-xs">
+                When off, the asset still counts toward net worth but is excluded from Summary
+                projections and allocation weights.
+              </p>
+            </div>
           </FormItem>
         )}
       />
@@ -1684,6 +1928,114 @@ function AssetFormFields({
           </FormItem>
         )}
       />
+      <div className="space-y-3 border-t pt-3">
+        <label className="flex cursor-pointer items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={loanLinked}
+            onChange={(e) => setLoanLinked(e.target.checked)}
+          />
+          <span>
+            <span className="font-medium">Linked loan</span>
+            <span className="text-muted-foreground block text-xs">
+              Optional. Creates or updates one liability secured by this asset. Unsecured loans stay
+              under Liabilities.
+            </span>
+          </span>
+        </label>
+        {loanLinked ? (
+          <div className="bg-muted/30 space-y-3 rounded-lg border p-3">
+            <FormField
+              control={control}
+              name="securedLiability.name"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Loan name</FormLabel>
+                  <FormControl>
+                    <Input placeholder="e.g. Car loan" {...field} value={field.value ?? ""} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={control}
+              name="securedLiability.liabilityType"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Loan type (optional)</FormLabel>
+                  <FormControl>
+                    <Input placeholder="Auto, mortgage…" {...field} value={field.value ?? ""} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={control}
+              name="securedLiability.currency"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Loan currency</FormLabel>
+                  <Select onValueChange={field.onChange} value={field.value ?? "USD"}>
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue placeholder="CCY" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {SUPPORTED_CURRENCIES.map((c) => (
+                        <SelectItem key={c} value={c}>
+                          {c}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={control}
+              name="securedLiability.trackingMode"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Loan tracking</FormLabel>
+                  <Select onValueChange={field.onChange} value={field.value ?? "fixed_installment"}>
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {LIABILITY_TRACKING_MODES.map((mode) => (
+                        <SelectItem key={mode} value={mode}>
+                          {mode === "fixed_installment" ? "Fixed installment" : "Revolving"}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={control}
+              name="securedLiability.currentBalance"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Amount still owed</FormLabel>
+                  <FormControl>
+                    <Input type="number" step="1" min={0} {...field} value={field.value ?? ""} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+        ) : null}
+      </div>
       <div className="space-y-3 border-t pt-3">
         <p className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
           Link to manage
@@ -1894,7 +2246,9 @@ function TargetAddForm({
   existingAssetIds: string[]
   onAdded: () => void
 }) {
-  const available = assets.filter((a) => !existingAssetIds.includes(a.id))
+  const available = assets.filter(
+    (a) => !existingAssetIds.includes(a.id) && a.includeInFiProjection,
+  )
 
   const form = useForm({
     resolver: zodResolver(allocationTargetSchema),
@@ -1922,7 +2276,9 @@ function TargetAddForm({
     return (
       <div className="text-muted-foreground flex items-center gap-1.5 text-sm">
         <span>—</span>
-        <InfoTooltip>All assets already have a target, or add assets first.</InfoTooltip>
+        <InfoTooltip>
+          All FI-plan assets already have a target, or add/mark assets for FI under Net Worth.
+        </InfoTooltip>
       </div>
     )
   }

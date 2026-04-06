@@ -48,6 +48,22 @@ function groupIncomeRecords(
   return m
 }
 
+function groupExpenseRecordsByLineId(
+  rows: (typeof expenseRecords.$inferSelect)[],
+): Record<string, (typeof expenseRecords.$inferSelect)[]> {
+  const m: Record<string, (typeof expenseRecords.$inferSelect)[]> = {}
+  for (const r of rows) {
+    if (!r.expenseLineId) continue
+    const k = r.expenseLineId
+    if (!m[k]) m[k] = []
+    m[k].push(r)
+  }
+  for (const k of Object.keys(m)) {
+    m[k].sort((a, b) => (a.occurredOn < b.occurredOn ? 1 : -1))
+  }
+  return m
+}
+
 function bumpNative(
   m: LineNativeMonthTotals,
   lineId: string,
@@ -192,6 +208,7 @@ const empty = {
   fxWarning: null as string | null,
   incomeLines: [] as (typeof incomeLines.$inferSelect)[],
   incomeRecordsByLineId: {} as Record<string, (typeof incomeRecords.$inferSelect)[]>,
+  expenseRecordsByLineId: {} as Record<string, (typeof expenseRecords.$inferSelect)[]>,
   incomeActualByLineNative: {} as LineNativeMonthTotals,
   incomePlannedByLineNative: {} as LineNativeMonthTotals,
   expenseCategories: [] as (typeof expenseCategories.$inferSelect)[],
@@ -200,6 +217,7 @@ const empty = {
     name: string
     trackingMode: string
     currency: string
+    securedByAssetName: string | null
   }[],
   expenseLines: [] as ((typeof expenseLines.$inferSelect) & { categoryName: string })[],
   expenseTransactionsByCategoryId: {} as Record<
@@ -279,8 +297,10 @@ export async function getBudgetPageData(opts?: {
       name: liabilities.name,
       trackingMode: liabilities.trackingMode,
       currency: liabilities.currency,
+      securedByAssetName: assets.name,
     })
     .from(liabilities)
+    .leftJoin(assets, eq(liabilities.securedByAssetId, assets.id))
     .orderBy(asc(liabilities.name))
 
   const fxPromise = loadRatesOnOrBefore(db, utcIsoDateString(now))
@@ -351,7 +371,7 @@ export async function getBudgetPageData(opts?: {
 
   const activeGoal = activeGoalRows[0]
   const goalCurrency = activeGoal?.currency ?? "AED"
-  const summaryCurrency = resolveBudgetSummaryCurrency(opts?.summaryCurrency, goalCurrency)
+  const summaryCurrency = resolveBudgetSummaryCurrency(opts?.summaryCurrency ?? null)
   let fxWarning: string | null = null
   if (!fx) {
     fxWarning =
@@ -549,7 +569,12 @@ export async function getBudgetPageData(opts?: {
       })
       .from(allocationTargets)
       .innerJoin(assets, eq(allocationTargets.assetId, assets.id))
-      .where(eq(allocationTargets.strategyId, activeStrat.id))
+      .where(
+        and(
+          eq(allocationTargets.strategyId, activeStrat.id),
+          eq(assets.includeInFiProjection, true),
+        ),
+      )
       .orderBy(asc(assets.name))
 
     const weightSum = stratTargetRows.reduce((s, r) => s + Number(r.weightPercent), 0)
@@ -557,7 +582,8 @@ export async function getBudgetPageData(opts?: {
 
     let disabledReason: string | null = null
     if (targetCount === 0) {
-      disabledReason = "Active strategy has no allocation targets."
+      disabledReason =
+        "Active strategy has no targets on FI-plan assets (Net Worth → Strategy, or mark assets “in FI plan”)."
     } else if (weightSum <= 0) {
       disabledReason = "Allocation weights must sum to a positive total."
     }
@@ -686,6 +712,7 @@ export async function getBudgetPageData(opts?: {
     fxWarning,
     incomeLines: lines,
     incomeRecordsByLineId: groupIncomeRecords(monthIncomeRec),
+    expenseRecordsByLineId: groupExpenseRecordsByLineId(monthExpRec),
     incomeActualByLineNative,
     incomePlannedByLineNative,
     expenseCategories: cats,

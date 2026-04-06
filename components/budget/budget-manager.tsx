@@ -21,6 +21,7 @@ import {
   createIncomeLine,
   createIncomeRecord,
   deleteExpenseCategory,
+  deleteExpenseLine,
   deleteExpenseRecord,
   deleteIncomeLine,
   deleteIncomeRecord,
@@ -37,6 +38,11 @@ import {
   parseBudgetFrequency,
   type BudgetRecurringFrequency,
 } from "@/lib/budget/recurring"
+import {
+  coalesceSupportedCurrency,
+  defaultExpenseCategoryRecordCurrency,
+  defaultIncomeLineRecordCurrency,
+} from "@/lib/budget/cashflow-input-currency"
 import type { getBudgetPageData } from "@/lib/data/budget"
 import { formatCurrency } from "@/lib/format"
 import {
@@ -167,18 +173,13 @@ function PlannedActualSummaryPair({
 }) {
   return (
     <div className="min-w-0 space-y-1">
-      <div className="font-heading grid grid-cols-[1fr_auto_1fr] items-baseline gap-x-1 text-lg font-semibold tabular-nums leading-tight xl:text-xl">
-        <span className="min-w-0 truncate">{formatSummaryCcyValue(ccy, planned)}</span>
-        <span className="text-muted-foreground shrink-0 text-base font-normal xl:text-lg">/</span>
-        <span className="min-w-0 truncate text-end">{formatSummaryCcyValue(ccy, actual)}</span>
-      </div>
-      <div className="text-muted-foreground grid grid-cols-[1fr_auto_1fr] gap-x-1 text-xs font-medium tracking-wide uppercase">
-        <span className="min-w-0 truncate">Planned</span>
-        <span aria-hidden className="pointer-events-none shrink-0 select-none opacity-0">
-          /
-        </span>
-        <span className="min-w-0 truncate text-end">Actual</span>
-      </div>
+      <p className="font-heading truncate text-3xl font-semibold leading-tight tabular-nums xl:text-4xl">
+        {formatSummaryCcyValue(ccy, actual)}
+      </p>
+      <p className="text-muted-foreground truncate text-sm tabular-nums leading-snug">
+        {formatSummaryCcyValue(ccy, planned)}
+        <span className="font-medium">/Planned</span>
+      </p>
     </div>
   )
 }
@@ -479,6 +480,10 @@ function normalizeWholeCurrencyAmountInput(value: string | number | null | undef
   return String(value).replace(/\..*$/, "")
 }
 
+function normalizeExpenseCategoryCurrency(code: string | null | undefined): SupportedCurrency {
+  return coalesceSupportedCurrency(code, "AED")
+}
+
 function expenseCategoryToDraft(c: BudgetData["expenseCategories"][number]): ExpenseCategoryDraft {
   return {
     name: c.name,
@@ -487,7 +492,7 @@ function expenseCategoryToDraft(c: BudgetData["expenseCategories"][number]): Exp
     isRecurring: c.isRecurring,
     frequency: parseBudgetFrequency(c.frequency) ?? "monthly",
     recurringAmount: normalizeWholeCurrencyAmountInput(c.recurringAmount),
-    recurringCurrency: c.isRecurring ? (c.recurringCurrency ?? "AED") : "AED",
+    recurringCurrency: c.isRecurring ? normalizeExpenseCategoryCurrency(c.recurringCurrency) : "AED",
   }
 }
 
@@ -523,7 +528,7 @@ function buildExpenseCategoryUpdatePayload(
     isRecurring: draft.isRecurring,
     frequency: draft.isRecurring ? draft.frequency : null,
     recurringAmount: parsedAmount,
-    recurringCurrency: draft.isRecurring ? draft.recurringCurrency : null,
+    recurringCurrency: draft.isRecurring ? normalizeExpenseCategoryCurrency(draft.recurringCurrency) : null,
   })
 }
 
@@ -668,6 +673,16 @@ function ExpenseCategoriesManageDialog({
     >,
   )
   const [isSavingAll, startSavingAll] = useTransition()
+
+  useEffect(() => {
+    if (!open) return
+    setDrafts(
+      Object.fromEntries(categories.map((c) => [c.id, expenseCategoryToDraft(c)])) as Record<
+        string,
+        ExpenseCategoryDraft
+      >,
+    )
+  }, [categories, open])
 
   const dirtyCategories = useMemo(
     () =>
@@ -1127,7 +1142,7 @@ function IncomeTab({
         <IncomeRecordsDialog
           line={recLine}
           records={data.incomeRecordsByLineId[recLine.id] ?? []}
-          defaultCurrency={data.summaryCurrency}
+          defaultCurrency={defaultIncomeLineRecordCurrency(recLine, data.summaryCurrency)}
           open={!!recLine}
           onOpenChange={(o) => !o && setRecLine(null)}
           onSaved={refresh}
@@ -1602,6 +1617,10 @@ function ExpensesTab({
   const [expandedCats, setExpandedCats] = useState<Record<string, boolean>>({})
   const [delCat, setDelCat] = useState<string | null>(null)
   const [importTxOpen, setImportTxOpen] = useState(false)
+  const [recExpenseLine, setRecExpenseLine] = useState<BudgetData["expenseLines"][number] | null>(
+    null,
+  )
+  const [delExpenseLineId, setDelExpenseLineId] = useState<string | null>(null)
   const [editRecord, setEditRecord] = useState<{
     id: string
     categoryId: string
@@ -1615,6 +1634,17 @@ function ExpensesTab({
   } | null>(null)
 
   const isDebtPayments = cashFlowType === "debt_payment"
+
+  const debtCategoryIdSet = useMemo(() => new Set(categories.map((c) => c.id)), [categories])
+  const debtPaymentLines = useMemo(
+    () => data.expenseLines.filter((l) => debtCategoryIdSet.has(l.categoryId)),
+    [data.expenseLines, debtCategoryIdSet],
+  )
+
+  const liabilityCurrencyById = useMemo(
+    () => new Map(data.liabilityOptions.map((l) => [l.id, l.currency])),
+    [data.liabilityOptions],
+  )
 
   return (
     <div className="space-y-6">
@@ -1645,6 +1675,97 @@ function ExpensesTab({
         }}
         refresh={refresh}
       />
+
+      {isDebtPayments ? (
+        <Card>
+          <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <CardHeaderTitleRow
+              title={<CardTitle>Debt payment lines</CardTitle>}
+              info={
+                <>
+                  Each line sits under a debt category (linked to a fixed-installment liability). Use{" "}
+                  <span className="font-medium">Records</span> to post payments for the month, like income lines.
+                  Category planned amounts stay on the rollup table below.
+                </>
+              }
+            />
+            <Button
+              size="sm"
+              variant="default"
+              className="shrink-0"
+              onClick={() => setLineDialog("create")}
+              disabled={categories.length === 0}
+            >
+              Add line
+            </Button>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Line</TableHead>
+                  <TableHead>Category</TableHead>
+                  <TableHead className="text-right">Actual</TableHead>
+                  <TableHead className="w-24 text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {debtPaymentLines.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={4} className="text-muted-foreground h-16 text-center">
+                      {categories.length === 0
+                        ? "Add a debt payment category first, then add lines to post payments."
+                        : "No lines yet. Use Add line or the + on a category row."}
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  debtPaymentLines.map((line) => {
+                    const actual = data.expenseActualByLineNative[line.id]
+                    return (
+                      <TableRow key={line.id}>
+                        <TableCell className="font-medium">{line.name}</TableCell>
+                        <TableCell className="text-muted-foreground text-sm">{line.categoryName}</TableCell>
+                        <TableCell className="text-right">{formatNativeLineTotals(actual)}</TableCell>
+                        <TableCell>
+                          <div className="flex items-center justify-end gap-0.5">
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button variant="ghost" size="icon-sm" aria-label="More actions">
+                                  <MoreHorizontal />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                <DropdownMenuItem onClick={() => setRecExpenseLine(line)}>
+                                  <ClipboardList className="size-4 opacity-70" />
+                                  Records
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => setLineDialog({ edit: line })}>
+                                  <Pencil className="size-4 opacity-70" />
+                                  Edit
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  variant="destructive"
+                                  onSelect={(e) => {
+                                    e.preventDefault()
+                                    setDelExpenseLineId(line.id)
+                                  }}
+                                >
+                                  <Trash2 className="size-4 opacity-70" />
+                                  Delete
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -1912,13 +2033,15 @@ function ExpensesTab({
       <ExpenseLineFormDialog
         open={lineDialog !== null}
         onOpenChange={(o) => !o && setLineDialog(null)}
-        categories={data.expenseCategories}
+        categories={categories}
+        emptyCategoriesScope={isDebtPayments ? "debt_payment" : "expense"}
         prefillCategoryId={
           lineDialog && lineDialog !== "create" && "createCategoryId" in lineDialog
             ? lineDialog.createCategoryId
             : undefined
         }
-        defaultRecordCurrency={data.summaryCurrency}
+        liabilityOptions={data.liabilityOptions}
+        fallbackCurrency={data.summaryCurrency}
         defaultOccurredOn={defaultBudgetRecordDateForMonth(data.monthStart, data.monthEnd)}
         line={
           lineDialog && lineDialog !== "create" && "edit" in lineDialog
@@ -1942,6 +2065,49 @@ function ExpensesTab({
           }}
         />
       ) : null}
+
+      {recExpenseLine ? (
+        <ExpenseRecordsDialog
+          line={recExpenseLine}
+          records={data.expenseRecordsByLineId[recExpenseLine.id] ?? []}
+          defaultCurrency={defaultExpenseCategoryRecordCurrency({
+            category: data.expenseCategories.find((c) => c.id === recExpenseLine.categoryId),
+            liabilityCurrencyById,
+            fallbackCurrency: data.summaryCurrency,
+          })}
+          open={!!recExpenseLine}
+          onOpenChange={(o) => !o && setRecExpenseLine(null)}
+          onSaved={refresh}
+        />
+      ) : null}
+
+      <AlertDialog open={!!delExpenseLineId} onOpenChange={(o) => !o && setDelExpenseLineId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete expense line?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Removes this line. Posted expense records stay on the category with no line label.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={async () => {
+                if (!delExpenseLineId) return
+                const r = await deleteExpenseLine(delExpenseLineId)
+                setDelExpenseLineId(null)
+                if (r.ok) {
+                  toast.success("Line deleted")
+                  refresh()
+                } else toast.error(r.error)
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={!!delCat} onOpenChange={(o) => !o && setDelCat(null)}>
         <AlertDialogContent>
@@ -2029,7 +2195,7 @@ function ExpenseCategoryFormDialog({
           category?.recurringAmount != null && category.recurringAmount !== ""
             ? String(category.recurringAmount)
             : "",
-        recurringCurrency: category?.recurringCurrency ?? "AED",
+        recurringCurrency: normalizeExpenseCategoryCurrency(category?.recurringCurrency),
       })
     }
   }, [open, category, defaultCashFlowType, form])
@@ -2047,7 +2213,7 @@ function ExpenseCategoryFormDialog({
       isRecurring: values.isRecurring,
       frequency: values.isRecurring ? values.frequency : null,
       recurringAmount: parsedAmount,
-      recurringCurrency: values.isRecurring ? values.recurringCurrency : null,
+      recurringCurrency: values.isRecurring ? normalizeExpenseCategoryCurrency(values.recurringCurrency) : null,
     }
     if (isEdit && category) {
       const p = updateExpenseCategorySchema.safeParse({ ...body, id: category.id })
@@ -2154,7 +2320,10 @@ function ExpenseCategoryFormDialog({
                           .filter((row) => row.trackingMode === "fixed_installment")
                           .map((row) => (
                             <SelectItem key={row.id} value={row.id}>
-                              {row.name} ({row.currency})
+                              {row.name} · {row.currency}
+                              {row.securedByAssetName
+                                ? ` · secures: ${row.securedByAssetName}`
+                                : ""}
                             </SelectItem>
                           ))}
                       </SelectContent>
@@ -2269,17 +2438,21 @@ function ExpenseLineFormDialog({
   open,
   onOpenChange,
   categories,
+  emptyCategoriesScope = "expense",
   prefillCategoryId,
-  defaultRecordCurrency,
+  liabilityOptions,
+  fallbackCurrency,
   defaultOccurredOn,
   line,
   onSaved,
 }: {
   open: boolean
   onOpenChange: (o: boolean) => void
-  categories: { id: string; name: string }[]
+  categories: BudgetData["expenseCategories"]
+  emptyCategoriesScope?: "expense" | "debt_payment"
   prefillCategoryId?: string
-  defaultRecordCurrency: SupportedCurrency
+  liabilityOptions: BudgetData["liabilityOptions"]
+  fallbackCurrency: SupportedCurrency
   defaultOccurredOn: string
   line?: BudgetData["expenseLines"][number]
   onSaved: () => void
@@ -2302,6 +2475,21 @@ function ExpenseLineFormDialog({
       })
     }
   }, [open, line, categories, prefillCategoryId, form])
+
+  const liabilityCurrencyById = useMemo(
+    () => new Map(liabilityOptions.map((l) => [l.id, l.currency])),
+    [liabilityOptions],
+  )
+  const categoryIdWatched = useWatch({ control: form.control, name: "categoryId" })
+  const recordCurrency = useMemo(
+    () =>
+      defaultExpenseCategoryRecordCurrency({
+        category: categories.find((c) => c.id === categoryIdWatched),
+        liabilityCurrencyById,
+        fallbackCurrency,
+      }),
+    [categories, categoryIdWatched, liabilityCurrencyById, fallbackCurrency],
+  )
 
   async function onSubmit(values: ExpenseLineFormValues) {
     const body = {
@@ -2340,11 +2528,16 @@ function ExpenseLineFormDialog({
           onSaved()
           return
         }
+        const currency = defaultExpenseCategoryRecordCurrency({
+          category: categories.find((c) => c.id === values.categoryId),
+          liabilityCurrencyById,
+          fallbackCurrency,
+        })
         const record = await createExpenseRecord({
           expenseCategoryId: p.data.categoryId,
           expenseLineId: createdLineId,
           amount,
-          currency: defaultRecordCurrency,
+          currency,
           occurredOn: defaultOccurredOn,
         })
         if (!record.ok) {
@@ -2367,7 +2560,11 @@ function ExpenseLineFormDialog({
           <DialogHeader>
             <div className="flex items-center gap-1.5">
               <DialogTitle>Category required</DialogTitle>
-              <InfoTooltip>Add an expense category from the Expenses tab before creating a line.</InfoTooltip>
+              <InfoTooltip>
+                {emptyCategoriesScope === "debt_payment"
+                  ? "Add a debt payment category with Add category before creating a line."
+                  : "Add an expense category from the Expenses tab before creating a line."}
+              </InfoTooltip>
             </div>
           </DialogHeader>
         </DialogContent>
@@ -2433,7 +2630,7 @@ function ExpenseLineFormDialog({
                 name="initialAmount"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Value ({defaultRecordCurrency})</FormLabel>
+                    <FormLabel>Value ({recordCurrency})</FormLabel>
                     <FormControl>
                       <Input type="number" step="0.01" min="0" placeholder="0.00" {...field} />
                     </FormControl>
@@ -2589,12 +2786,14 @@ function EditExpenseRecordDialog({
 function ExpenseRecordsDialog({
   line,
   records,
+  defaultCurrency,
   open,
   onOpenChange,
   onSaved,
 }: {
   line: { id: string; name: string; categoryId: string }
   records: { id: string; amount: string; occurredOn: string; currency?: string | null }[]
+  defaultCurrency: SupportedCurrency
   open: boolean
   onOpenChange: (o: boolean) => void
   onSaved: () => void
@@ -2605,7 +2804,7 @@ function ExpenseRecordsDialog({
       expenseCategoryId: line.categoryId,
       expenseLineId: line.id,
       amount: 0,
-      currency: "AED",
+      currency: defaultCurrency,
       occurredOn: new Date().toISOString().slice(0, 10),
     },
   })
@@ -2616,11 +2815,11 @@ function ExpenseRecordsDialog({
         expenseCategoryId: line.categoryId,
         expenseLineId: line.id,
         amount: 0,
-        currency: "AED",
+        currency: defaultCurrency,
         occurredOn: new Date().toISOString().slice(0, 10),
       })
     }
-  }, [open, line.id, line.categoryId, addForm])
+  }, [open, line.id, line.categoryId, defaultCurrency, addForm])
 
   async function addRec(values: z.infer<typeof expenseRecordSchema>) {
     const r = await createExpenseRecord({
@@ -2634,7 +2833,7 @@ function ExpenseRecordsDialog({
         expenseCategoryId: line.categoryId,
         expenseLineId: line.id,
         amount: 0,
-        currency: "AED",
+        currency: defaultCurrency,
         occurredOn: new Date().toISOString().slice(0, 10),
       })
       onSaved()
@@ -2703,176 +2902,6 @@ function ExpenseRecordsDialog({
           >
             <input type="hidden" {...addForm.register("expenseCategoryId")} />
             <input type="hidden" {...addForm.register("expenseLineId")} />
-            <FormField
-              control={addForm.control}
-              name="amount"
-              render={({ field }) => (
-                <FormItem className="min-w-[100px] flex-1">
-                  <FormLabel>Amount</FormLabel>
-                  <FormControl>
-                    <Input type="number" step="0.01" {...field} />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={addForm.control}
-              name="currency"
-              render={({ field }) => (
-                <FormItem className="min-w-[100px]">
-                  <FormLabel>CCY</FormLabel>
-                  <Select onValueChange={field.onChange} value={field.value}>
-                    <FormControl>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      {SUPPORTED_CURRENCIES.map((c) => (
-                        <SelectItem key={c} value={c}>
-                          {c}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={addForm.control}
-              name="occurredOn"
-              render={({ field }) => (
-                <FormItem className="min-w-[140px]">
-                  <FormLabel>Date</FormLabel>
-                  <FormControl>
-                    <Input type="date" {...field} />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-          </form>
-        </Form>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-function ExpenseCategoryRecordsDialog({
-  category,
-  records,
-  open,
-  onOpenChange,
-  onSaved,
-}: {
-  category: { id: string; name: string }
-  records: { id: string; amount: string; occurredOn: string; currency?: string | null }[]
-  open: boolean
-  onOpenChange: (o: boolean) => void
-  onSaved: () => void
-}) {
-  const addForm = useForm<z.infer<typeof expenseRecordSchema>>({
-    resolver: zodResolver(expenseRecordSchema),
-    defaultValues: {
-      expenseCategoryId: category.id,
-      amount: 0,
-      currency: "AED",
-      occurredOn: new Date().toISOString().slice(0, 10),
-    },
-  })
-
-  useEffect(() => {
-    if (open) {
-      addForm.reset({
-        expenseCategoryId: category.id,
-        amount: 0,
-        currency: "AED",
-        occurredOn: new Date().toISOString().slice(0, 10),
-      })
-    }
-  }, [open, category.id, addForm])
-
-  async function addRec(values: z.infer<typeof expenseRecordSchema>) {
-    const r = await createExpenseRecord({
-      ...values,
-      expenseCategoryId: category.id,
-      expenseLineId: undefined,
-    })
-    if (r.ok) {
-      toast.success("Record added")
-      addForm.reset({
-        expenseCategoryId: category.id,
-        amount: 0,
-        currency: "AED",
-        occurredOn: new Date().toISOString().slice(0, 10),
-      })
-      onSaved()
-    } else toast.error(r.error)
-  }
-
-  const expRecordFormId = `budget-expense-category-record-${category.id}`
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
-        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
-          <DialogTitle className="min-w-0 flex-1 pr-8">Records — {category.name}</DialogTitle>
-          <Button type="submit" form={expRecordFormId} size="sm" className="shrink-0">
-            Add record
-          </Button>
-        </DialogHeader>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Date</TableHead>
-              <TableHead className="text-right">Amount</TableHead>
-              <TableHead className="w-20" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {records.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={3} className="text-muted-foreground h-14 text-center">
-                  No records.
-                </TableCell>
-              </TableRow>
-            ) : (
-              records.map((r) => (
-                <TableRow key={r.id}>
-                  <TableCell className="font-mono text-xs">{r.occurredOn}</TableCell>
-                  <TableCell className="text-right">
-                    {formatCurrency(Number(r.amount), r.currency ?? "AED")}
-                  </TableCell>
-                  <TableCell>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-destructive"
-                      onClick={async () => {
-                        const res = await deleteExpenseRecord(r.id)
-                        if (res.ok) {
-                          toast.success("Removed")
-                          onSaved()
-                        } else toast.error(res.error)
-                      }}
-                    >
-                      Delete
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
-        <Form {...addForm}>
-          <form
-            id={expRecordFormId}
-            onSubmit={addForm.handleSubmit(addRec)}
-            className="flex flex-wrap gap-2 border-t pt-4"
-          >
-            <input type="hidden" {...addForm.register("expenseCategoryId")} />
             <FormField
               control={addForm.control}
               name="amount"

@@ -8,11 +8,12 @@ export const dynamic = "force-dynamic"
 export default async function SummaryPage({
   searchParams,
 }: {
-  searchParams: Promise<{ goalId?: string }>
+  searchParams: Promise<{ goalId?: string; ccy?: string }>
 }) {
   const sp = await searchParams
-  const { summary, goalOptions } = await getSummaryPageData({
+  const { summary, goalOptions, summaryCurrencyOptions } = await getSummaryPageData({
     goalId: sp.goalId ?? null,
+    reportingCurrencyRequest: sp.ccy ?? null,
   })
 
   return (
@@ -20,7 +21,13 @@ export default async function SummaryPage({
       <PageHeader
         title="FI Summary"
         description="Progress toward your target: current net worth, projected path, and whether you reach the FI number your goal requires."
-        controls={<SummaryPageControls data={summary} goalOptions={goalOptions} />}
+        controls={
+          <SummaryPageControls
+            data={summary}
+            goalOptions={goalOptions}
+            summaryCurrencyOptions={summaryCurrencyOptions}
+          />
+        }
       />
       <SummaryDashboard data={summary} />
     </div>

@@ -16,6 +16,26 @@ import { formatCurrency, formatMonths, formatPercent } from "@/lib/format"
 
 type SummaryData = Awaited<ReturnType<typeof getSummaryData>>
 
+function FiProjectionPathTooltip({ data }: { data: SummaryData }) {
+  const meta: string[] = []
+  if (data.goalFiDate) meta.push(`FI ${data.goalFiDate}`)
+  if (data.fxAsOfDate) meta.push(`FX ${data.fxAsOfDate}`)
+  return (
+    <>
+      <p>
+        FI-scoped path: assets marked &quot;in FI plan&quot; plus monthly investable, minus projected
+        liabilities. Full balance-sheet net worth is in the cards above and on FI Summary.
+      </p>
+      {meta.length > 0 ? (
+        <p className="text-muted-foreground mt-2">{meta.join(" · ")}</p>
+      ) : null}
+      <p className="mt-2">
+        Withdrawal target (lifestyle funding): {formatPercent(data.assumedWithdrawalRate)}.
+      </p>
+    </>
+  )
+}
+
 export function SummaryDashboard({ data }: { data: SummaryData }) {
   const ccy = data.reportingCurrency
 
@@ -39,7 +59,7 @@ export function SummaryDashboard({ data }: { data: SummaryData }) {
         />
         <MetricCard
           title="Net worth"
-          info="Gross asset balances minus liabilities, in goal currency (FX per line). Cash debt payments stay in Cash Flow."
+          info="Full balance sheet: all asset balances minus all liabilities, in the reporting currency you select in the control bar (converted from each line’s currency)."
           value={formatCurrency(data.netWorth, ccy, { maximumFractionDigits: 0 })}
         />
         <MetricCard
@@ -59,13 +79,7 @@ export function SummaryDashboard({ data }: { data: SummaryData }) {
         <CardHeader>
           <CardHeaderTitleRow
             title={<CardTitle>Net worth vs projection</CardTitle>}
-            info={
-              <>
-                Gross asset trajectory (returns, maturities, contributions), then projected liabilities are
-                subtracted to show net worth through FI. Withdrawal target:{" "}
-                {formatPercent(data.assumedWithdrawalRate)}.
-              </>
-            }
+            info={<FiProjectionPathTooltip data={data} />}
           />
         </CardHeader>
         <CardContent className="pt-2">
@@ -76,12 +90,17 @@ export function SummaryDashboard({ data }: { data: SummaryData }) {
               currencyCode={ccy}
             />
           ) : (
-            <div className="bg-muted/30 flex aspect-[21/9] w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed p-6">
+            <div className="bg-muted/30 flex aspect-[21/9] w-full flex-col items-center justify-center gap-3 rounded-lg border border-dashed p-6">
               <Skeleton className="h-32 w-full max-w-md" />
-              <div className="text-muted-foreground flex items-center gap-1.5 text-sm">
-                <span>No projection data yet.</span>
-                <InfoTooltip>Add a goal, assets, and an active strategy to see the curve.</InfoTooltip>
-              </div>
+              <InfoTooltip>
+                <>
+                  <p className="font-medium">No projection data yet.</p>
+                  <p className="mt-2 text-muted-foreground">
+                    Add a goal, assets included in FI projection, and an active allocation strategy to see
+                    the curve.
+                  </p>
+                </>
+              </InfoTooltip>
             </div>
           )}
         </CardContent>

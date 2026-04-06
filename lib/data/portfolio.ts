@@ -67,10 +67,40 @@ export type PortfolioPageData = {
   fiDateLabel: string | null
   portfolioFxWarning: string | null
   fxAsOfDate: string | null
+  /** At most one secured liability per asset id (DB constraint). */
+  securedLiabilityByAssetId: Record<
+    string,
+    {
+      id: string
+      name: string
+      liabilityType: string | null
+      trackingMode: string
+      currency: string
+      currentBalance: string
+    }
+  >
+}
+
+function buildSecuredLiabilityByAssetId(
+  liabilityList: PortfolioLiabilityRow[],
+): PortfolioPageData["securedLiabilityByAssetId"] {
+  const m: PortfolioPageData["securedLiabilityByAssetId"] = {}
+  for (const L of liabilityList) {
+    if (!L.securedByAssetId) continue
+    m[L.securedByAssetId] = {
+      id: L.id,
+      name: L.name,
+      liabilityType: L.liabilityType,
+      trackingMode: L.trackingMode,
+      currency: L.currency,
+      currentBalance: L.currentBalance,
+    }
+  }
+  return m
 }
 
 function emptyPortfolio(): PortfolioPageData {
-  const summaryCurrency = resolveBudgetSummaryCurrency(null, "USD")
+  const summaryCurrency = resolveBudgetSummaryCurrency(null)
   return {
     assets: [],
     liabilities: [],
@@ -78,6 +108,7 @@ function emptyPortfolio(): PortfolioPageData {
     activeStrategy: null,
     targets: [],
     allocationRecordsByAssetId: {},
+    securedLiabilityByAssetId: {},
     totalInvestedReporting: null,
     currentPositionReporting: null,
     totalLiabilitiesReporting: null,
@@ -181,6 +212,7 @@ export async function getPortfolioData(opts?: {
   }
 
   const liabilityList = await loadPortfolioLiabilities(db)
+  const securedLiabilityByAssetId = buildSecuredLiabilityByAssetId(liabilityList)
 
   const [goal] = await db
     .select()
@@ -190,7 +222,7 @@ export async function getPortfolioData(opts?: {
     .limit(1)
 
   if (!goal) {
-    const summaryCurrency = resolveBudgetSummaryCurrency(opts?.summaryCurrency ?? null, "USD")
+    const summaryCurrency = resolveBudgetSummaryCurrency(opts?.summaryCurrency ?? null)
     return {
       assets: assetList,
       liabilities: liabilityList,
@@ -198,6 +230,7 @@ export async function getPortfolioData(opts?: {
       activeStrategy,
       targets,
       allocationRecordsByAssetId,
+      securedLiabilityByAssetId,
       totalInvestedReporting: null,
       currentPositionReporting: null,
       totalLiabilitiesReporting: null,
@@ -213,10 +246,7 @@ export async function getPortfolioData(opts?: {
   }
 
   const goalCurrency = goal.currency ?? "USD"
-  const summaryCurrency = resolveBudgetSummaryCurrency(
-    opts?.summaryCurrency ?? null,
-    goalCurrency,
-  )
+  const summaryCurrency = resolveBudgetSummaryCurrency(opts?.summaryCurrency ?? null)
   const todayStr = utcIsoDateString(new Date())
   const fx = await loadRatesOnOrBefore(db, todayStr)
 
@@ -228,6 +258,7 @@ export async function getPortfolioData(opts?: {
       activeStrategy,
       targets,
       allocationRecordsByAssetId,
+      securedLiabilityByAssetId,
       totalInvestedReporting: null,
       currentPositionReporting: null,
       totalLiabilitiesReporting: null,
@@ -259,6 +290,7 @@ export async function getPortfolioData(opts?: {
         activeStrategy,
         targets,
         allocationRecordsByAssetId,
+        securedLiabilityByAssetId,
         totalInvestedReporting: null,
         currentPositionReporting: null,
         totalLiabilitiesReporting: null,
@@ -287,6 +319,7 @@ export async function getPortfolioData(opts?: {
         activeStrategy,
         targets,
         allocationRecordsByAssetId,
+        securedLiabilityByAssetId,
         totalInvestedReporting: null,
         currentPositionReporting,
         totalLiabilitiesReporting: null,
@@ -316,6 +349,7 @@ export async function getPortfolioData(opts?: {
         activeStrategy,
         targets,
         allocationRecordsByAssetId,
+        securedLiabilityByAssetId,
         totalInvestedReporting,
         currentPositionReporting,
         totalLiabilitiesReporting: null,
@@ -334,52 +368,19 @@ export async function getPortfolioData(opts?: {
 
   const netPositionReporting = currentPositionReporting - totalLiabilitiesReporting
 
-  const fiPlan = await getFiPlanPageData()
+  const fiPlan = await getFiPlanPageData({ reportingCurrencyRequest: summaryCurrency })
   const summary = fiPlan.summary
-  let yearlyProjectedReporting =
+  const yearlyProjectedReporting =
     summary.fxWarning == null && summary.chartSeries.length > 0
       ? chartPointsToYearEndTotals(summary.chartSeries)
       : []
 
-  if (
-    goalCurrency !== summaryCurrency &&
-    yearlyProjectedReporting.length > 0
-  ) {
-    const converted: { year: number; projectedTotal: number }[] = []
-    let projectionConvertOk = true
-    for (const row of yearlyProjectedReporting) {
-      const c = convertAmount(row.projectedTotal, goalCurrency, summaryCurrency, rates)
-      if (c == null) {
-        projectionConvertOk = false
-        break
-      }
-      converted.push({ year: row.year, projectedTotal: c })
-    }
-    if (projectionConvertOk) {
-      yearlyProjectedReporting = converted
-    } else {
-      yearlyProjectedReporting = []
-    }
-  }
-
-  let portfolioFxWarning =
+  const portfolioFxWarning =
     summary.fxWarning != null
       ? summary.fxWarning
       : yearlyProjectedReporting.length === 0 && summary.chartSeries.length === 0
         ? "Add assets and an active goal to see yearly projected values."
         : null
-
-  if (
-    goalCurrency !== summaryCurrency &&
-    summary.fxWarning == null &&
-    summary.chartSeries.length > 0 &&
-    yearlyProjectedReporting.length === 0
-  ) {
-    portfolioFxWarning =
-      portfolioFxWarning != null
-        ? `${portfolioFxWarning} Could not convert yearly projection to ${summaryCurrency}.`
-        : `Could not convert yearly projection from ${goalCurrency} to ${summaryCurrency}.`
-  }
 
   return {
     assets: assetList,
@@ -388,6 +389,7 @@ export async function getPortfolioData(opts?: {
     activeStrategy,
     targets,
     allocationRecordsByAssetId,
+    securedLiabilityByAssetId,
     totalInvestedReporting,
     currentPositionReporting,
     totalLiabilitiesReporting,

@@ -113,6 +113,13 @@
       "when": 1775206718805,
       "tag": "0015_lethal_iron_lad",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1775300000000,
+      "tag": "0016_asset_category_fi",
+      "breakpoints": true
     }
   ]
 }

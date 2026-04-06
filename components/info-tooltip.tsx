@@ -27,7 +27,7 @@ export function InfoTooltip({
           <HelpCircle className="size-3.5" />
         </button>
       </TooltipTrigger>
-      <TooltipContent side="top" className="max-w-xs text-pretty">
+      <TooltipContent side="top" className="max-w-sm text-pretty">
         {children}
       </TooltipContent>
     </Tooltip>

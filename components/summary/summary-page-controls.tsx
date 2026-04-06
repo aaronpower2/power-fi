@@ -12,7 +12,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import type { getSummaryData, SummaryGoalOption } from "@/lib/data/summary"
+import type {
+  getSummaryData,
+  SummaryGoalOption,
+  SummaryPageData,
+} from "@/lib/data/summary"
 import { dashboardRoutes } from "@/lib/routes"
 import { PieChart } from "lucide-react"
 
@@ -21,9 +25,11 @@ type SummaryData = Awaited<ReturnType<typeof getSummaryData>>
 export function SummaryPageControls({
   data,
   goalOptions,
+  summaryCurrencyOptions,
 }: {
   data: SummaryData
   goalOptions: SummaryGoalOption[]
+  summaryCurrencyOptions: SummaryPageData["summaryCurrencyOptions"]
 }) {
   const router = useRouter()
   const ccy = data.reportingCurrency
@@ -44,7 +50,10 @@ export function SummaryPageControls({
             <Select
               value={data.reportingGoalId ?? goalOptions[0]!.id}
               onValueChange={(id) => {
-                router.push(`/summary?goalId=${encodeURIComponent(id)}`)
+                const p = new URLSearchParams()
+                p.set("goalId", id)
+                p.set("ccy", data.reportingCurrency)
+                router.push(`${dashboardRoutes.fiSummary}?${p.toString()}`)
               }}
             >
               <SelectTrigger
@@ -62,14 +71,45 @@ export function SummaryPageControls({
               </SelectContent>
             </Select>
             <InfoTooltip>
-              Summary uses this goal&apos;s FI date, withdrawal rate, and monthly funding target. Amounts are
-              in {ccy}, converted from asset and flow line currencies
-              {data.fxAsOfDate ? ` using ECB reference rates as of ${data.fxAsOfDate}` : ""}.
+              <p>
+                Summary uses this goal&apos;s FI date, withdrawal rate, and monthly funding target. Amounts are
+                in {ccy}, converted from asset and flow line currencies (ECB reference rates via Frankfurter).
+              </p>
+              {(data.goalFiDate || data.fxAsOfDate) && (
+                <p className="text-muted-foreground mt-2">
+                  {[data.goalFiDate ? `FI ${data.goalFiDate}` : null, data.fxAsOfDate ? `FX ${data.fxAsOfDate}` : null]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </p>
+              )}
             </InfoTooltip>
           </>
         )}
       </div>
       <div className="flex shrink-0 flex-nowrap items-center gap-2">
+        <div
+          className="bg-muted/40 inline-flex rounded-lg border p-0.5"
+          role="group"
+          aria-label="Reporting currency for FI summary amounts"
+        >
+          {summaryCurrencyOptions.map((code) => (
+            <Button
+              key={code}
+              type="button"
+              size="sm"
+              variant={data.reportingCurrency === code ? "secondary" : "ghost"}
+              className="h-7 min-w-12 px-2.5 text-xs font-medium"
+              onClick={() => {
+                const p = new URLSearchParams()
+                if (data.reportingGoalId) p.set("goalId", data.reportingGoalId)
+                p.set("ccy", code)
+                router.push(`${dashboardRoutes.fiSummary}?${p.toString()}`)
+              }}
+            >
+              {code}
+            </Button>
+          ))}
+        </div>
         <Button asChild size="sm" variant="outline">
           <Link href={primaryDrilldown.href}>{primaryDrilldown.label}</Link>
         </Button>

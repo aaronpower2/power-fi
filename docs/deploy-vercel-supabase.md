@@ -27,6 +27,7 @@ Append `?sslmode=require` if your client or docs require it (many Supabase URIs 
 
 1. Import the Git repo in [Vercel](https://vercel.com) if you have not already.
 2. **Settings → Environment Variables** → add **`DATABASE_URL`** with the **transaction pooler** URI for Production (and Preview/Development if you want).
+3. **Front door (recommended for a public URL):** add **`SITE_PASSWORD`** (shared password for your household) and **`SITE_AUTH_SECRET`** (long random secret, e.g. `openssl rand -hex 32`). Without both, the app stays open to anyone with the link.
 
 ## 4. Schema (first time)
 

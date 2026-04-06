@@ -42,6 +42,23 @@ function rev() {
   revalidatePath(dashboardRoutes.fiSummary)
 }
 
+function isUniqueSecuredAssetError(e: unknown): boolean {
+  const chain: unknown[] = [e]
+  let cur: unknown = e
+  for (let i = 0; i < 5 && cur && typeof cur === "object" && "cause" in cur; i++) {
+    cur = (cur as { cause: unknown }).cause
+    chain.push(cur)
+  }
+  for (const err of chain) {
+    if (!err || typeof err !== "object") continue
+    const o = err as { code?: string; constraint?: string }
+    if (o.code === "23505" && /liabilities_secured/i.test(String(o.constraint ?? ""))) {
+      return true
+    }
+  }
+  return false
+}
+
 function sumConvertedRecordAmounts(args: {
   rows: { amount: string; currency: string | null }[]
   reportingCurrency: string
@@ -59,7 +76,8 @@ function sumConvertedRecordAmounts(args: {
 
 function toDbAsset(v: {
   name: string
-  assetType: string
+  assetCategory: (typeof assets.$inferInsert)["assetCategory"]
+  includeInFiProjection: boolean
   currency: string
   growthType: "compound" | "capital"
   assumedAnnualReturnPercent?: number
@@ -81,7 +99,8 @@ function toDbAsset(v: {
 
   return {
     name: v.name,
-    assetType: v.assetType,
+    assetCategory: v.assetCategory,
+    includeInFiProjection: v.includeInFiProjection,
     currency: v.currency,
     growthType: v.growthType,
     assumedAnnualReturn,
@@ -100,16 +119,39 @@ export async function createAsset(input: unknown): Promise<ActionResult<{ id: st
   if (!parsed.success) {
     return err(parsed.error.issues.map((i: { message: string }) => i.message).join(" "))
   }
-  const row = toDbAsset(parsed.data)
-  const [a] = await db
-    .insert(assets)
-    .values({
-      ...row,
-      createdAt: new Date(),
+  const { securedLiability, ...assetInput } = parsed.data
+  const row = toDbAsset(assetInput)
+  try {
+    const id = await db.transaction(async (tx) => {
+      const [a] = await tx
+        .insert(assets)
+        .values({
+          ...row,
+          createdAt: new Date(),
+        })
+        .returning({ id: assets.id })
+      if (securedLiability) {
+        await tx.insert(liabilities).values({
+          name: securedLiability.name,
+          liabilityType: securedLiability.liabilityType?.trim() || null,
+          trackingMode: securedLiability.trackingMode,
+          currency: securedLiability.currency,
+          currentBalance: securedLiability.currentBalance.toFixed(2),
+          securedByAssetId: a.id,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })
+      }
+      return a.id
     })
-    .returning({ id: assets.id })
-  rev()
-  return ok({ id: a.id })
+    rev()
+    return ok({ id })
+  } catch (e) {
+    if (isUniqueSecuredAssetError(e)) {
+      return err("Another liability is already linked to that asset.")
+    }
+    throw e
+  }
 }
 
 export async function updateAsset(input: unknown): Promise<ActionResult> {
@@ -119,16 +161,59 @@ export async function updateAsset(input: unknown): Promise<ActionResult> {
   if (!parsed.success) {
     return err(parsed.error.issues.map((i: { message: string }) => i.message).join(" "))
   }
-  const { id, ...rest } = parsed.data
+  const { id, securedLiability, ...rest } = parsed.data
   const row = toDbAsset(rest)
-  await db.update(assets).set(row).where(eq(assets.id, id))
-  rev()
-  return ok()
+  try {
+    await db.transaction(async (tx) => {
+      await tx.update(assets).set(row).where(eq(assets.id, id))
+      if (securedLiability === null) {
+        await tx.delete(liabilities).where(eq(liabilities.securedByAssetId, id))
+      } else if (securedLiability !== undefined) {
+        const [existing] = await tx
+          .select({ id: liabilities.id })
+          .from(liabilities)
+          .where(eq(liabilities.securedByAssetId, id))
+          .limit(1)
+        if (existing) {
+          await tx
+            .update(liabilities)
+            .set({
+              name: securedLiability.name,
+              liabilityType: securedLiability.liabilityType?.trim() || null,
+              trackingMode: securedLiability.trackingMode,
+              currency: securedLiability.currency,
+              currentBalance: securedLiability.currentBalance.toFixed(2),
+              updatedAt: new Date(),
+            })
+            .where(eq(liabilities.id, existing.id))
+        } else {
+          await tx.insert(liabilities).values({
+            name: securedLiability.name,
+            liabilityType: securedLiability.liabilityType?.trim() || null,
+            trackingMode: securedLiability.trackingMode,
+            currency: securedLiability.currency,
+            currentBalance: securedLiability.currentBalance.toFixed(2),
+            securedByAssetId: id,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          })
+        }
+      }
+    })
+    rev()
+    return ok()
+  } catch (e) {
+    if (isUniqueSecuredAssetError(e)) {
+      return err("Another liability is already linked to that asset.")
+    }
+    throw e
+  }
 }
 
 export async function deleteAsset(id: string): Promise<ActionResult> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
+  await db.delete(liabilities).where(eq(liabilities.securedByAssetId, id))
   await db.delete(assets).where(eq(assets.id, id))
   rev()
   return ok()
@@ -215,23 +300,6 @@ export async function updateLiability(input: unknown): Promise<ActionResult> {
   }
 }
 
-function isUniqueSecuredAssetError(e: unknown): boolean {
-  const chain: unknown[] = [e]
-  let cur: unknown = e
-  for (let i = 0; i < 5 && cur && typeof cur === "object" && "cause" in cur; i++) {
-    cur = (cur as { cause: unknown }).cause
-    chain.push(cur)
-  }
-  for (const err of chain) {
-    if (!err || typeof err !== "object") continue
-    const o = err as { code?: string; constraint?: string }
-    if (o.code === "23505" && /liabilities_secured/i.test(String(o.constraint ?? ""))) {
-      return true
-    }
-  }
-  return false
-}
-
 export async function deleteLiability(id: string): Promise<ActionResult> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
@@ -308,6 +376,14 @@ export async function upsertAllocationTarget(input: unknown): Promise<ActionResu
     return err(parsed.error.issues.map((i: { message: string }) => i.message).join(" "))
   }
   const v = parsed.data
+  const [a] = await db
+    .select({ includeInFiProjection: assets.includeInFiProjection })
+    .from(assets)
+    .where(eq(assets.id, v.assetId))
+  if (!a) return err("Asset not found.")
+  if (!a.includeInFiProjection) {
+    return err("Only assets included in your FI plan can have allocation targets.")
+  }
   const w = v.weightPercent.toFixed(3)
   await db
     .insert(allocationTargets)
@@ -342,6 +418,14 @@ export async function createAllocationRecord(
     return err(parsed.error.issues.map((i: { message: string }) => i.message).join(" "))
   }
   const v = parsed.data
+  const [assetRow] = await db
+    .select({ includeInFiProjection: assets.includeInFiProjection })
+    .from(assets)
+    .where(eq(assets.id, v.assetId))
+  if (!assetRow) return err("Asset not found.")
+  if (!assetRow.includeInFiProjection) {
+    return err("Allocation records apply to assets in your FI plan only.")
+  }
   const [row] = await db
     .insert(allocationRecords)
     .values({
@@ -414,10 +498,7 @@ export async function allocateInvestablePerStrategy(
       .limit(1),
   ])
 
-  const reportingCurrency = resolveBudgetSummaryCurrency(
-    summaryCurrency,
-    activeGoalRows[0]?.currency ?? "AED",
-  )
+  const reportingCurrency = resolveBudgetSummaryCurrency(summaryCurrency)
 
   if (!fx) {
     return err("FX rates unavailable; cannot convert to asset currencies.")
@@ -460,10 +541,17 @@ export async function allocateInvestablePerStrategy(
     })
     .from(allocationTargets)
     .innerJoin(assets, eq(allocationTargets.assetId, assets.id))
-    .where(eq(allocationTargets.strategyId, strat.id))
+    .where(
+      and(
+        eq(allocationTargets.strategyId, strat.id),
+        eq(assets.includeInFiProjection, true),
+      ),
+    )
 
   if (targets.length === 0) {
-    return err("Active strategy has no allocation targets.")
+    return err(
+      "Active strategy has no allocation targets on FI-plan assets. Add targets or mark assets for FI.",
+    )
   }
 
   type SplitRow = { assetId: string; weightPercent: number; currency: string | null }
