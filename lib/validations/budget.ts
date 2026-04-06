@@ -100,7 +100,7 @@ const expenseCategoryFields = z.object({
   sortOrder: z.coerce.number().int().default(0),
   cashFlowType: cashFlowTypeSchema.default("expense"),
   linkedLiabilityId: z
-    .union([z.string().uuid(), z.literal("")])
+    .union([z.string().uuid(), z.literal(""), z.null()])
     .optional()
     .transform((v) => (v === "" || v == null ? undefined : v)),
   isRecurring: z.boolean().default(false),
