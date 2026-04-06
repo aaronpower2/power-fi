@@ -1,5 +1,3 @@
-import { PDFParse } from "pdf-parse"
-
 import type { NormalizedImportRow } from "@/lib/imports/types"
 import { parseMoneyString } from "@/lib/imports/parse-money"
 
@@ -55,6 +53,7 @@ export async function parsePdfTransactions(
   opts: ParsePdfOptions = {},
 ): Promise<NormalizedImportRow[]> {
   const currency = (opts.currency ?? "AED").toUpperCase().slice(0, 3)
+  const { PDFParse } = await import("pdf-parse")
   const parser = new PDFParse({ data: new Uint8Array(buffer) })
   let text = ""
   try {
