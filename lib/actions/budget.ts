@@ -1,10 +1,11 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
-import { eq, sql } from "drizzle-orm"
+import { and, eq, gte, inArray, lte, sql } from "drizzle-orm"
 import { z } from "zod"
 
 import { err, ok, type ActionResult } from "@/lib/action-result"
+import { INTERNAL_DEBT_CATEGORY_NAME, isInternalDebtCategoryName } from "@/lib/budget/debt-payment"
 import { monthlyPlannedForExpenseCategory, monthlyPlannedForLine } from "@/lib/budget/planned-line"
 import {
   parseYearMonthYm,
@@ -47,6 +48,12 @@ function parseIssues(e: { issues: { message: string }[] }) {
 type AppDb = NonNullable<ReturnType<typeof getDb>>
 type AppTx = Parameters<Parameters<AppDb["transaction"]>[0]>[0]
 
+function defaultOccurredOnForMonth(monthStart: string, monthEnd: string): string {
+  const today = new Date().toISOString().slice(0, 10)
+  if (today >= monthStart && today <= monthEnd) return today
+  return monthEnd
+}
+
 async function reverseExpenseRecordLiability(
   tx: AppTx,
   row: {
@@ -66,7 +73,94 @@ async function reverseExpenseRecordLiability(
     .where(eq(liabilities.id, row.appliedLiabilityId))
 }
 
+async function ensureInternalDebtCategory(tx: AppTx): Promise<string> {
+  const [existing] = await tx
+    .select({ id: expenseCategories.id })
+    .from(expenseCategories)
+    .where(eq(expenseCategories.name, INTERNAL_DEBT_CATEGORY_NAME))
+    .limit(1)
+  if (existing) return existing.id
+  const [created] = await tx
+    .insert(expenseCategories)
+    .values({
+      name: INTERNAL_DEBT_CATEGORY_NAME,
+      sortOrder: 999999,
+      cashFlowType: "expense",
+      linkedLiabilityId: null,
+      isRecurring: false,
+      frequency: null,
+      recurringAmount: null,
+      recurringCurrency: "USD",
+    })
+    .returning({ id: expenseCategories.id })
+  return created.id
+}
+
+async function resolveExpenseRecordCategoryId(
+  tx: AppTx,
+  input: { expenseCategoryId: string; expenseLineId?: string | null; linkedLiabilityId?: string | null },
+): Promise<string> {
+  if (input.linkedLiabilityId) {
+    return ensureInternalDebtCategory(tx)
+  }
+  if (!input.expenseLineId) return input.expenseCategoryId
+  const [line] = await tx
+    .select({ categoryId: expenseLines.categoryId })
+    .from(expenseLines)
+    .where(eq(expenseLines.id, input.expenseLineId))
+    .limit(1)
+  return line?.categoryId ?? input.expenseCategoryId
+}
+
 async function applyExpenseRecordLiability(
+  tx: AppTx,
+  input: {
+    expenseCategoryId: string
+    expenseLineId?: string | null
+    amount: number
+  },
+): Promise<{ appliedLiabilityId: string | null; appliedLiabilityAmount: string | null }> {
+  if (input.expenseLineId) {
+    const [line] = await tx
+      .select({
+        linkedLiabilityId: expenseLines.linkedLiabilityId,
+        liabilityTrackingMode: liabilities.trackingMode,
+        liabilityCurrentBalance: liabilities.currentBalance,
+      })
+      .from(expenseLines)
+      .leftJoin(liabilities, eq(expenseLines.linkedLiabilityId, liabilities.id))
+      .where(eq(expenseLines.id, input.expenseLineId))
+      .limit(1)
+
+    if (
+      line?.linkedLiabilityId &&
+      line.liabilityTrackingMode === "fixed_installment"
+    ) {
+      const currentBalance = Number(line.liabilityCurrentBalance ?? 0)
+      const applied = Math.max(0, Math.min(currentBalance, input.amount))
+      if (applied <= 0) {
+        return { appliedLiabilityId: null, appliedLiabilityAmount: null }
+      }
+
+      await tx
+        .update(liabilities)
+        .set({
+          currentBalance: sql`GREATEST(${liabilities.currentBalance} - ${applied.toFixed(2)}, 0)`,
+          updatedAt: new Date(),
+        })
+        .where(eq(liabilities.id, line.linkedLiabilityId))
+
+      return {
+        appliedLiabilityId: line.linkedLiabilityId,
+        appliedLiabilityAmount: applied.toFixed(2),
+      }
+    }
+  }
+
+  return applyExpenseRecordLiabilityFromCategory(tx, input.expenseCategoryId, input.amount)
+}
+
+async function applyExpenseRecordLiabilityFromCategory(
   tx: AppTx,
   expenseCategoryId: string,
   amount: number,
@@ -109,6 +203,51 @@ async function applyExpenseRecordLiability(
     appliedLiabilityId: category.linkedLiabilityId,
     appliedLiabilityAmount: applied.toFixed(2),
   }
+}
+
+async function insertExpenseRecordInTx(
+  tx: AppTx,
+  input: {
+    expenseCategoryId: string
+    expenseLineId?: string
+    amount: number
+    currency: string
+    occurredOn: string
+  },
+) {
+  const [line] = input.expenseLineId
+    ? await tx
+        .select({
+          categoryId: expenseLines.categoryId,
+          linkedLiabilityId: expenseLines.linkedLiabilityId,
+        })
+        .from(expenseLines)
+        .where(eq(expenseLines.id, input.expenseLineId))
+        .limit(1)
+    : [null]
+  const expenseCategoryId = await resolveExpenseRecordCategoryId(tx, {
+    expenseCategoryId: input.expenseCategoryId,
+    expenseLineId: input.expenseLineId,
+    linkedLiabilityId: line?.linkedLiabilityId ?? null,
+  })
+  const liabilityEffect = await applyExpenseRecordLiability(tx, {
+    expenseCategoryId,
+    expenseLineId: input.expenseLineId,
+    amount: input.amount,
+  })
+  const [row] = await tx
+    .insert(expenseRecords)
+    .values({
+      expenseCategoryId,
+      expenseLineId: input.expenseLineId,
+      appliedLiabilityId: liabilityEffect.appliedLiabilityId,
+      appliedLiabilityAmount: liabilityEffect.appliedLiabilityAmount,
+      amount: input.amount.toFixed(2),
+      currency: input.currency,
+      occurredOn: input.occurredOn,
+    })
+    .returning({ id: expenseRecords.id })
+  return row
 }
 
 export async function createIncomeLine(input: unknown): Promise<ActionResult<{ id: string }>> {
@@ -285,13 +424,24 @@ export async function createExpenseLine(input: unknown): Promise<ActionResult<{ 
   const parsed = expenseLineSchema.safeParse(input)
   if (!parsed.success) return err(parseIssues(parsed.error))
   const v = parsed.data
-  const [row] = await db
-    .insert(expenseLines)
-    .values({
-      categoryId: v.categoryId,
-      name: v.name,
-    })
-    .returning({ id: expenseLines.id })
+  const [row] = await db.transaction(async (tx) => {
+    const categoryId = v.linkedLiabilityId
+      ? await ensureInternalDebtCategory(tx)
+      : (v.categoryId ?? await ensureInternalDebtCategory(tx))
+    return tx
+      .insert(expenseLines)
+      .values({
+        categoryId,
+        name: v.name,
+        linkedLiabilityId: v.linkedLiabilityId,
+        isRecurring: v.isRecurring,
+        frequency: v.frequency,
+        recurringAmount: v.recurringAmount != null ? v.recurringAmount.toFixed(2) : null,
+        recurringCurrency: v.recurringCurrency ?? "AED",
+        recurringAnchorDate: v.recurringAnchorDate ?? null,
+      })
+      .returning({ id: expenseLines.id })
+  })
   rev()
   return ok({ id: row.id })
 }
@@ -302,13 +452,24 @@ export async function updateExpenseLine(input: unknown): Promise<ActionResult> {
   const parsed = updateExpenseLineSchema.safeParse(input)
   if (!parsed.success) return err(parseIssues(parsed.error))
   const v = parsed.data
-  await db
-    .update(expenseLines)
-    .set({
-      categoryId: v.categoryId,
-      name: v.name,
-    })
-    .where(eq(expenseLines.id, v.id))
+  await db.transaction(async (tx) => {
+    const categoryId = v.linkedLiabilityId
+      ? await ensureInternalDebtCategory(tx)
+      : (v.categoryId ?? await ensureInternalDebtCategory(tx))
+    await tx
+      .update(expenseLines)
+      .set({
+        categoryId,
+        name: v.name,
+        linkedLiabilityId: v.linkedLiabilityId,
+        isRecurring: v.isRecurring,
+        frequency: v.frequency,
+        recurringAmount: v.recurringAmount != null ? v.recurringAmount.toFixed(2) : null,
+        recurringCurrency: v.recurringCurrency ?? "AED",
+        recurringAnchorDate: v.recurringAnchorDate ?? null,
+      })
+      .where(eq(expenseLines.id, v.id))
+  })
   rev()
   return ok()
 }
@@ -327,21 +488,7 @@ export async function createExpenseRecord(input: unknown): Promise<ActionResult<
   const parsed = expenseRecordSchema.safeParse(input)
   if (!parsed.success) return err(parseIssues(parsed.error))
   const v = parsed.data
-  const [row] = await db.transaction(async (tx) => {
-    const liabilityEffect = await applyExpenseRecordLiability(tx, v.expenseCategoryId, v.amount)
-    return tx
-      .insert(expenseRecords)
-      .values({
-        expenseCategoryId: v.expenseCategoryId,
-        expenseLineId: v.expenseLineId,
-        appliedLiabilityId: liabilityEffect.appliedLiabilityId,
-        appliedLiabilityAmount: liabilityEffect.appliedLiabilityAmount,
-        amount: v.amount.toFixed(2),
-        currency: v.currency,
-        occurredOn: v.occurredOn,
-      })
-      .returning({ id: expenseRecords.id })
-  })
+  const row = await db.transaction((tx) => insertExpenseRecordInTx(tx, v))
   rev()
   return ok({ id: row.id })
 }
@@ -359,14 +506,32 @@ export async function updateExpenseRecord(input: unknown): Promise<ActionResult>
       .where(eq(expenseRecords.id, v.id))
     if (!existing) return
     await reverseExpenseRecordLiability(tx, existing)
-    const liabilityEffect = await applyExpenseRecordLiability(
-      tx,
-      existing.expenseCategoryId,
-      v.amount,
-    )
+    const expenseLineId = v.expenseLineId ?? existing.expenseLineId ?? undefined
+    const [line] = expenseLineId
+      ? await tx
+          .select({
+            categoryId: expenseLines.categoryId,
+            linkedLiabilityId: expenseLines.linkedLiabilityId,
+          })
+          .from(expenseLines)
+          .where(eq(expenseLines.id, expenseLineId))
+          .limit(1)
+      : [null]
+    const expenseCategoryId = await resolveExpenseRecordCategoryId(tx, {
+      expenseCategoryId: v.expenseCategoryId,
+      expenseLineId,
+      linkedLiabilityId: line?.linkedLiabilityId ?? null,
+    })
+    const liabilityEffect = await applyExpenseRecordLiability(tx, {
+      expenseCategoryId,
+      expenseLineId,
+      amount: v.amount,
+    })
     await tx
       .update(expenseRecords)
       .set({
+        expenseCategoryId,
+        expenseLineId,
         appliedLiabilityId: liabilityEffect.appliedLiabilityId,
         appliedLiabilityAmount: liabilityEffect.appliedLiabilityAmount,
         amount: v.amount.toFixed(2),
@@ -420,6 +585,7 @@ export async function finalizeBudgetMonth(input: unknown): Promise<ActionResult>
 
   const incomeRows = await db.select().from(incomeLines)
   const expenseCategoryRows = await db.select().from(expenseCategories)
+  const expenseLineRows = await db.select().from(expenseLines)
   const { end } = utcMonthBoundsForCalendarMonth(parts.year, parts.monthIndex0)
   const snapshotValues = [
     ...incomeRows.map((line) => {
@@ -435,6 +601,7 @@ export async function finalizeBudgetMonth(input: unknown): Promise<ActionResult>
       }
     }),
     ...expenseCategoryRows.map((cat) => {
+      if (cat.cashFlowType === "debt_payment" || isInternalDebtCategoryName(cat.name)) return null
       const { currency, amount } = monthlyPlannedForExpenseCategory(cat)
       return {
         periodMonth: start,
@@ -446,7 +613,21 @@ export async function finalizeBudgetMonth(input: unknown): Promise<ActionResult>
         plannedAmount: amount.toFixed(2),
       }
     }),
-  ]
+    ...expenseLineRows
+      .filter((line) => !!line.linkedLiabilityId)
+      .map((line) => {
+        const { currency, amount } = monthlyPlannedForLine(line, start, end)
+        return {
+          periodMonth: start,
+          lineKind: "expense" as const,
+          incomeLineId: null,
+          expenseLineId: line.id,
+          expenseCategoryId: null,
+          currency,
+          plannedAmount: amount.toFixed(2),
+        }
+      }),
+  ].filter((value): value is NonNullable<typeof value> => value !== null)
 
   await db.transaction(async (tx) => {
     await tx.delete(budgetMonthPlanLines).where(eq(budgetMonthPlanLines.periodMonth, start))
@@ -457,4 +638,80 @@ export async function finalizeBudgetMonth(input: unknown): Promise<ActionResult>
 
   rev()
   return ok()
+}
+
+const postPlannedDebtPaymentsSchema = z.object({
+  yearMonth: finalizeYmSchema,
+  expenseLineIds: z.array(z.string().uuid()).optional(),
+})
+
+export async function postPlannedDebtPayments(
+  input: unknown,
+): Promise<ActionResult<{ createdCount: number; skippedCount: number }>> {
+  const db = getDb()
+  if (!db) return err("Database not configured (set DATABASE_URL).")
+  const parsed = postPlannedDebtPaymentsSchema.safeParse(input)
+  if (!parsed.success) return err(parseIssues(parsed.error))
+  const parts = parseYearMonthYm(parsed.data.yearMonth)
+  if (!parts) return err("Invalid month.")
+  const { start, end } = utcMonthBoundsForCalendarMonth(parts.year, parts.monthIndex0)
+
+  const selectedLineIds = parsed.data.expenseLineIds ?? null
+  const debtLines = await db
+    .select()
+    .from(expenseLines)
+    .where(
+      selectedLineIds
+        ? inArray(expenseLines.id, selectedLineIds)
+        : sql`${expenseLines.linkedLiabilityId} IS NOT NULL`,
+    )
+
+  if (debtLines.length === 0) {
+    return ok({ createdCount: 0, skippedCount: 0 })
+  }
+
+  const occurredOn = defaultOccurredOnForMonth(start, end)
+  const existingRows = await db
+    .select({
+      expenseLineId: expenseRecords.expenseLineId,
+    })
+    .from(expenseRecords)
+    .where(
+      and(
+        gte(expenseRecords.occurredOn, start),
+        lte(expenseRecords.occurredOn, end),
+        sql`${expenseRecords.expenseLineId} IS NOT NULL`,
+      ),
+    )
+
+  const existingLineIds = new Set(existingRows.map((row) => row.expenseLineId).filter(Boolean))
+  let createdCount = 0
+  let skippedCount = 0
+
+  await db.transaction(async (tx) => {
+    for (const line of debtLines) {
+      if (!line.linkedLiabilityId) continue
+      const { currency, amount } = monthlyPlannedForLine(line, start, end)
+      if (!Number.isFinite(amount) || amount <= 0) {
+        skippedCount += 1
+        continue
+      }
+      if (existingLineIds.has(line.id)) {
+        skippedCount += 1
+        continue
+      }
+      await insertExpenseRecordInTx(tx, {
+        expenseCategoryId: line.categoryId,
+        expenseLineId: line.id,
+        amount,
+        currency,
+        occurredOn,
+      })
+      existingLineIds.add(line.id)
+      createdCount += 1
+    }
+  })
+
+  rev()
+  return ok({ createdCount, skippedCount })
 }

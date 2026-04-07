@@ -39,6 +39,7 @@ export const securedLiabilityPayloadSchema = z.object({
   currency: supportedCurrencySchema,
   trackingMode: liabilityTrackingModeSchema,
   currentBalance: z.coerce.number().min(0),
+  autoCreateBudgetCategory: z.boolean().optional().default(false),
 })
 
 const assetObject = z.object({
@@ -169,6 +170,7 @@ const liabilityObject = z.object({
   trackingMode: liabilityTrackingModeSchema.default("fixed_installment"),
   currentBalance: z.coerce.number().min(0),
   securedByAssetId: optionalSecuredAssetId,
+  autoCreateBudgetCategory: z.boolean().optional().default(false),
 })
 
 export const createLiabilitySchema = liabilityObject

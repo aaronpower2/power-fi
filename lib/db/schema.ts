@@ -213,8 +213,16 @@ export const expenseLines = pgTable("expense_lines", {
     .notNull()
     .references(() => expenseCategories.id, { onDelete: "cascade" }),
   name: varchar("name", { length: 256 }).notNull(),
+  linkedLiabilityId: uuid("linked_liability_id").references(() => liabilities.id, {
+    onDelete: "set null",
+  }),
+  isRecurring: boolean("is_recurring").notNull().default(false),
+  frequency: varchar("frequency", { length: 32 }),
+  recurringAmount: numeric("recurring_amount", { precision: 16, scale: 2 }),
+  recurringCurrency: varchar("recurring_currency", { length: 3 }).notNull().default("USD"),
+  recurringAnchorDate: date("recurring_anchor_date"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-})
+}, (t) => [index("expense_lines_linked_liability_idx").on(t.linkedLiabilityId)])
 
 /** Frozen planned monthly totals for closed months (finalize action). */
 export const budgetMonthPlanLines = pgTable(

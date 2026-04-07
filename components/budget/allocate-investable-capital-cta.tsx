@@ -108,7 +108,11 @@ export function AllocateInvestableCapitalCta({
         ) : (
           <Zap className="size-3.5" data-icon="inline-start" aria-hidden />
         )}
-        {pending ? "Working…" : "Allocate Investable Capital"}
+        {pending
+          ? "Working…"
+          : allocatePreview
+            ? "Allocate Investable Capital"
+            : "Set up allocation strategy"}
       </Button>
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>

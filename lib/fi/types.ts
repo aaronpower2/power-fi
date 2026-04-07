@@ -16,6 +16,17 @@ export type EngineAssetInput = {
   maturationDate: Date | null
 }
 
+export type BlendedReturnAssetInput = Pick<
+  EngineAssetInput,
+  "currentBalance" | "growthType" | "assumedAnnualReturn"
+>
+
+export type CoastFiInput = {
+  requiredPrincipal: number
+  monthsToFiDate: number
+  blendedAnnualReturn: number
+}
+
 export type EngineAllocationInput = {
   assetId: string
   weightPercent: number

@@ -25,6 +25,7 @@ import {
   deleteExpenseRecord,
   deleteIncomeLine,
   deleteIncomeRecord,
+  postPlannedDebtPayments,
   updateExpenseCategory,
   updateExpenseLine,
   updateExpenseRecord,
@@ -41,6 +42,7 @@ import {
 import {
   coalesceSupportedCurrency,
   defaultExpenseCategoryRecordCurrency,
+  defaultExpenseLineRecordCurrency,
   defaultIncomeLineRecordCurrency,
 } from "@/lib/budget/cashflow-input-currency"
 import type { getBudgetPageData } from "@/lib/data/budget"
@@ -245,6 +247,8 @@ type ExpenseLineDialogState =
   | { createCategoryId: string }
   | { edit: BudgetData["expenseLines"][number] }
   | null
+
+type DebtPaymentLineDialogState = "create" | { edit: BudgetData["debtPaymentLines"][number] } | null
 
 function ExpenseCategoryPieCard({
   data,
@@ -808,11 +812,7 @@ export function BudgetManager({ data }: { data: BudgetData }) {
   const router = useRouter()
   const refresh = () => router.refresh()
   const expenseCategories = useMemo(
-    () => data.expenseCategories.filter((category) => category.cashFlowType !== "debt_payment"),
-    [data.expenseCategories],
-  )
-  const debtPaymentCategories = useMemo(
-    () => data.expenseCategories.filter((category) => category.cashFlowType === "debt_payment"),
+    () => data.expenseCategories,
     [data.expenseCategories],
   )
 
@@ -821,14 +821,15 @@ export function BudgetManager({ data }: { data: BudgetData }) {
   const [incomeLineDialog, setIncomeLineDialog] = useState<IncomeLineDialogState>(null)
   const [expenseCatDialog, setExpenseCatDialog] = useState<ExpenseCatDialogState>(null)
   const [expenseLineDialog, setExpenseLineDialog] = useState<ExpenseLineDialogState>(null)
+  const [debtLineDialog, setDebtLineDialog] = useState<DebtPaymentLineDialogState>(null)
   const [expenseCategoriesManageOpen, setExpenseCategoriesManageOpen] = useState(false)
 
   return (
     <div id="budget-detail" className="space-y-6 scroll-mt-4">
       {data.isPastMonth && !data.planUsesSnapshot ? (
         <p className="text-muted-foreground bg-muted/40 rounded-md border px-3 py-2 text-sm">
-          This month is in the past: planned amounts use live rules until you finalize (income lines +
-          expense categories; then the snapshot stays locked).
+          This month is in the past: planned amounts use live rules until you finalize (income lines,
+          expense categories, and debt payment lines; then the snapshot stays locked).
         </p>
       ) : null}
       {data.fxWarning ? (
@@ -884,7 +885,7 @@ export function BudgetManager({ data }: { data: BudgetData }) {
           <CardHeader className="gap-0 pb-1 pt-3">
             <CardHeaderTitleRow
               title={<CardTitle className="text-sm leading-tight">Debt payments</CardTitle>}
-              info="Planned from recurring debt-payment categories; actual from posted debt-service records. These cash outflows reduce investable capital and can reduce linked fixed-installment liabilities."
+              info="Planned from recurring debt payment lines; actual from posted debt-service records. These cash outflows reduce investable capital and can reduce linked fixed-installment liabilities."
             />
           </CardHeader>
           <CardContent className="pb-3 pt-0">
@@ -940,17 +941,11 @@ export function BudgetManager({ data }: { data: BudgetData }) {
             />
           </TabsContent>
           <TabsContent value="debt-payments" className="mt-4">
-            <ExpensesTab
+            <DebtPaymentsTab
               data={data}
-              cashFlowType="debt_payment"
-              categories={debtPaymentCategories}
               refresh={refresh}
-              catDialog={expenseCatDialog}
-              setCatDialog={setExpenseCatDialog}
-              lineDialog={expenseLineDialog}
-              setLineDialog={setExpenseLineDialog}
-              categoriesManageOpen={expenseCategoriesManageOpen}
-              setCategoriesManageOpen={setExpenseCategoriesManageOpen}
+              lineDialog={debtLineDialog}
+              setLineDialog={setDebtLineDialog}
             />
           </TabsContent>
         </Tabs>
@@ -1588,6 +1583,249 @@ function IncomeRecordsDialog({
         </Form>
       </DialogContent>
     </Dialog>
+  )
+}
+
+function DebtPaymentsTab({
+  data,
+  refresh,
+  lineDialog,
+  setLineDialog,
+}: {
+  data: BudgetData
+  refresh: () => void
+  lineDialog: DebtPaymentLineDialogState
+  setLineDialog: Dispatch<SetStateAction<DebtPaymentLineDialogState>>
+}) {
+  const [recLine, setRecLine] = useState<BudgetData["debtPaymentLines"][number] | null>(null)
+  const [delLineId, setDelLineId] = useState<string | null>(null)
+  const [postingTarget, setPostingTarget] = useState<string | "all" | null>(null)
+
+  const liabilityById = useMemo(
+    () => new Map(data.liabilityOptions.map((liability) => [liability.id, liability])),
+    [data.liabilityOptions],
+  )
+  const liabilityCurrencyById = useMemo(
+    () => new Map(data.liabilityOptions.map((liability) => [liability.id, liability.currency])),
+    [data.liabilityOptions],
+  )
+
+  async function postPlanned(expenseLineIds?: string[]) {
+    setPostingTarget(expenseLineIds?.[0] ?? "all")
+    const res = await postPlannedDebtPayments({
+      yearMonth: data.ym,
+      expenseLineIds,
+    })
+    setPostingTarget(null)
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+    const createdCount = res.data?.createdCount ?? 0
+    const skippedCount = res.data?.skippedCount ?? 0
+    if (createdCount > 0) {
+      toast.success(
+        createdCount === 1
+          ? "Debt payment posted"
+          : `${createdCount} planned debt payments posted`,
+      )
+      refresh()
+      return
+    }
+    if (skippedCount > 0) {
+      toast.message("Nothing posted. These lines already have records or no planned amount for the month.")
+      return
+    }
+    toast.message("No planned debt payments to post for this month.")
+  }
+
+  const readyToPostCount = data.debtPaymentLines.filter((line) => {
+    const plannedParts = plannedBucketsWithPositiveAmount(data.expensePlannedByLineNative[line.id])
+    const records = data.expenseRecordsByLineId[line.id] ?? []
+    return plannedParts.length > 0 && records.length === 0
+  }).length
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <CardHeaderTitleRow
+            title={<CardTitle>Debt payment lines</CardTitle>}
+            info="Each line links directly to a liability, carries its own recurring plan, and posts audited payment records that can reduce the linked balance."
+          />
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => postPlanned()}
+              disabled={readyToPostCount === 0 || postingTarget === "all"}
+            >
+              {postingTarget === "all" ? "Posting…" : "Post all planned debt payments"}
+            </Button>
+            <Button size="sm" onClick={() => setLineDialog("create")}>
+              Add debt line
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Line</TableHead>
+                <TableHead>Liability</TableHead>
+                <TableHead className="text-right">Planned</TableHead>
+                <TableHead className="text-right">Actual</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="w-28 text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.debtPaymentLines.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={6} className="text-muted-foreground h-16 text-center">
+                    No debt payment lines yet. Create one from a liability to track planned and posted payments.
+                  </TableCell>
+                </TableRow>
+              ) : (
+                data.debtPaymentLines.map((line) => {
+                  const liability = line.linkedLiabilityId
+                    ? liabilityById.get(line.linkedLiabilityId)
+                    : null
+                  const planned = data.expensePlannedByLineNative[line.id]
+                  const actual = data.expenseActualByLineNative[line.id]
+                  const records = data.expenseRecordsByLineId[line.id] ?? []
+                  const canPostPlanned =
+                    plannedBucketsWithPositiveAmount(planned).length > 0 && records.length === 0
+
+                  return (
+                    <TableRow key={line.id}>
+                      <TableCell className="font-medium">
+                        <div>{line.name}</div>
+                        <div className="text-muted-foreground text-xs">
+                          {line.isRecurring
+                            ? BUDGET_FREQUENCY_LABELS[(parseBudgetFrequency(line.frequency) ?? "monthly") as BudgetRecurringFrequency]
+                            : "Manual"}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        <div>{liability?.name ?? "Unlinked"}</div>
+                        <div className="text-muted-foreground text-xs">
+                          {liability?.securedByAssetName ? `Secured by ${liability.securedByAssetName}` : liability?.currency ?? "—"}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right">{formatNativeLineTotals(planned)}</TableCell>
+                      <TableCell className="text-right">{formatNativeLineTotals(actual)}</TableCell>
+                      <TableCell className="text-muted-foreground text-sm">
+                        {records.length > 0
+                          ? `${records.length} record${records.length === 1 ? "" : "s"} posted`
+                          : canPostPlanned
+                            ? "Ready to post"
+                            : "No planned amount"}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center justify-end gap-0.5">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={!canPostPlanned || postingTarget === line.id}
+                            onClick={() => postPlanned([line.id])}
+                          >
+                            {postingTarget === line.id ? "Posting…" : "Post"}
+                          </Button>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button variant="ghost" size="icon-sm" aria-label="More actions">
+                                <MoreHorizontal />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem onClick={() => setRecLine(line)}>
+                                <ClipboardList className="size-4 opacity-70" />
+                                Records
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => setLineDialog({ edit: line })}>
+                                <Pencil className="size-4 opacity-70" />
+                                Edit
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                variant="destructive"
+                                onSelect={(e) => {
+                                  e.preventDefault()
+                                  setDelLineId(line.id)
+                                }}
+                              >
+                                <Trash2 className="size-4 opacity-70" />
+                                Delete
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })
+              )}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+
+      <DebtPaymentLineFormDialog
+        open={lineDialog !== null}
+        onOpenChange={(open) => !open && setLineDialog(null)}
+        liabilityOptions={data.liabilityOptions}
+        line={lineDialog && lineDialog !== "create" && "edit" in lineDialog ? lineDialog.edit : undefined}
+        onSaved={() => {
+          setLineDialog(null)
+          refresh()
+        }}
+      />
+
+      {recLine ? (
+        <ExpenseRecordsDialog
+          line={recLine}
+          records={data.expenseRecordsByLineId[recLine.id] ?? []}
+          defaultCurrency={defaultExpenseLineRecordCurrency({
+            line: recLine,
+            liabilityCurrencyById,
+            fallbackCurrency: data.summaryCurrency,
+          })}
+          open={!!recLine}
+          onOpenChange={(open) => !open && setRecLine(null)}
+          onSaved={refresh}
+        />
+      ) : null}
+
+      <AlertDialog open={!!delLineId} onOpenChange={(open) => !open && setDelLineId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete debt payment line?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Removes this debt line. Posted records stay on the month history, but future planned and one-click posting will stop.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={async () => {
+                if (!delLineId) return
+                const res = await deleteExpenseLine(delLineId)
+                setDelLineId(null)
+                if (res.ok) {
+                  toast.success("Debt line deleted")
+                  refresh()
+                } else {
+                  toast.error(res.error)
+                }
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
   )
 }
 
@@ -2432,6 +2670,255 @@ type ExpenseLineFormValues = {
   categoryId: string
   name: string
   initialAmount: string
+}
+
+type DebtPaymentLineFormValues = {
+  name: string
+  linkedLiabilityId: string
+  isRecurring: boolean
+  frequency: BudgetRecurringFrequency
+  recurringAmount: string
+  recurringCurrency: SupportedCurrency
+}
+
+function DebtPaymentLineFormDialog({
+  open,
+  onOpenChange,
+  liabilityOptions,
+  line,
+  onSaved,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  liabilityOptions: BudgetData["liabilityOptions"]
+  line?: BudgetData["debtPaymentLines"][number]
+  onSaved: () => void
+}) {
+  const isEdit = !!line
+  const fallbackLiabilityId = liabilityOptions[0]?.id ?? ""
+  const fallbackCurrency = coalesceSupportedCurrency(liabilityOptions[0]?.currency, "AED")
+  const form = useForm<DebtPaymentLineFormValues>({
+    defaultValues: {
+      name: line?.name ?? "",
+      linkedLiabilityId: line?.linkedLiabilityId ?? fallbackLiabilityId,
+      isRecurring: line?.isRecurring ?? true,
+      frequency: (parseBudgetFrequency(line?.frequency ?? null) ?? "monthly") as BudgetRecurringFrequency,
+      recurringAmount: normalizeWholeCurrencyAmountInput(line?.recurringAmount),
+      recurringCurrency: coalesceSupportedCurrency(line?.recurringCurrency ?? null, fallbackCurrency),
+    },
+  })
+
+  const watchedLiabilityId = useWatch({ control: form.control, name: "linkedLiabilityId" })
+  const isRecurring = useWatch({ control: form.control, name: "isRecurring" })
+
+  useEffect(() => {
+    if (!open) return
+    const matchedLiability = liabilityOptions.find((option) => option.id === watchedLiabilityId)
+    if (!matchedLiability) return
+    const current = form.getValues("recurringCurrency")
+    if (!current) {
+      form.setValue(
+        "recurringCurrency",
+        coalesceSupportedCurrency(matchedLiability.currency, fallbackCurrency),
+      )
+    }
+  }, [open, watchedLiabilityId, liabilityOptions, form, fallbackCurrency])
+
+  useEffect(() => {
+    if (open) {
+      const matchedLiability = liabilityOptions.find(
+        (option) => option.id === (line?.linkedLiabilityId ?? fallbackLiabilityId),
+      )
+      form.reset({
+        name: line?.name ?? "",
+        linkedLiabilityId: line?.linkedLiabilityId ?? fallbackLiabilityId,
+        isRecurring: line?.isRecurring ?? true,
+        frequency: (parseBudgetFrequency(line?.frequency ?? null) ?? "monthly") as BudgetRecurringFrequency,
+        recurringAmount: normalizeWholeCurrencyAmountInput(line?.recurringAmount),
+        recurringCurrency: coalesceSupportedCurrency(
+          line?.recurringCurrency ?? null,
+          coalesceSupportedCurrency(matchedLiability?.currency ?? null, fallbackCurrency),
+        ),
+      })
+    }
+  }, [open, line, liabilityOptions, fallbackLiabilityId, fallbackCurrency, form])
+
+  async function onSubmit(values: DebtPaymentLineFormValues) {
+    const payload = {
+      categoryId: null,
+      name: values.name.trim(),
+      linkedLiabilityId: values.linkedLiabilityId,
+      isRecurring: values.isRecurring,
+      frequency: values.isRecurring ? values.frequency : null,
+      recurringAmount:
+        values.isRecurring && values.recurringAmount.trim() !== ""
+          ? Number(values.recurringAmount)
+          : null,
+      recurringCurrency: values.isRecurring ? values.recurringCurrency : null,
+      recurringAnchorDate: null,
+    }
+    const parsed = isEdit && line
+      ? updateExpenseLineSchema.safeParse({ ...payload, id: line.id })
+      : expenseLineSchema.safeParse(payload)
+
+    if (!parsed.success) {
+      toast.error(parsed.error.issues.map((issue: { message: string }) => issue.message).join(" "))
+      return
+    }
+
+    const res = isEdit && line
+      ? await updateExpenseLine(parsed.data)
+      : await createExpenseLine(parsed.data)
+
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+
+    toast.success(isEdit ? "Debt line updated" : "Debt line created")
+    onOpenChange(false)
+    onSaved()
+  }
+
+  const formId = isEdit ? "budget-debt-line-edit" : "budget-debt-line-create"
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto">
+        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+          <DialogTitle className="min-w-0 flex-1 pr-8">
+            {isEdit ? "Edit debt payment line" : "New debt payment line"}
+          </DialogTitle>
+          <Button type="submit" form={formId} size="sm" className="shrink-0">
+            {isEdit ? "Save" : "Create"}
+          </Button>
+        </DialogHeader>
+        <Form {...form}>
+          <form id={formId} onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
+            <FormField
+              control={form.control}
+              name="name"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Line name</FormLabel>
+                  <FormControl>
+                    <Input {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="linkedLiabilityId"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Linked liability</FormLabel>
+                  <Select onValueChange={field.onChange} value={field.value}>
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Choose liability" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {liabilityOptions.map((option) => (
+                        <SelectItem key={option.id} value={option.id}>
+                          {option.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="isRecurring"
+              render={({ field }) => (
+                <FormItem className="flex items-center justify-between rounded-md border px-3 py-2">
+                  <div>
+                    <FormLabel>Recurring planned payment</FormLabel>
+                    <p className="text-muted-foreground text-sm">
+                      Enable this to include the line in FI planning and one-click monthly posting.
+                    </p>
+                  </div>
+                  <FormControl>
+                    <Switch checked={field.value} onCheckedChange={field.onChange} />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+            {isRecurring ? (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <FormField
+                  control={form.control}
+                  name="frequency"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Frequency</FormLabel>
+                      <Select onValueChange={field.onChange} value={field.value}>
+                        <FormControl>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          {BUDGET_RECURRING_FREQUENCIES.map((frequency) => (
+                            <SelectItem key={frequency} value={frequency}>
+                              {BUDGET_FREQUENCY_LABELS[frequency]}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="recurringAmount"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Amount</FormLabel>
+                      <FormControl>
+                        <Input type="number" step="0.01" min="0" placeholder="0.00" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="recurringCurrency"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Currency</FormLabel>
+                      <Select onValueChange={field.onChange} value={field.value}>
+                        <FormControl>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          {SUPPORTED_CURRENCIES.map((currency) => (
+                            <SelectItem key={currency} value={currency}>
+                              {currency}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </div>
+            ) : null}
+          </form>
+        </Form>
+      </DialogContent>
+    </Dialog>
+  )
 }
 
 function ExpenseLineFormDialog({

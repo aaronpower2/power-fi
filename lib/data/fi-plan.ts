@@ -1,26 +1,36 @@
 import { and, desc, eq, gte, lte } from "drizzle-orm"
 
-import { monthlyPlannedForExpenseCategory } from "@/lib/budget/planned-line"
+import {
+  isInternalDebtCategoryName,
+} from "@/lib/budget/debt-payment"
+import {
+  monthlyPlannedForExpenseCategory,
+  monthlyPlannedForLine,
+} from "@/lib/budget/planned-line"
 import {
   BUDGET_SUMMARY_CURRENCIES,
   resolveBudgetSummaryCurrency,
 } from "@/lib/budget/summary-currency"
 import { convertAmount } from "@/lib/currency/convert"
 import { loadRatesOnOrBefore } from "@/lib/currency/rates"
-import { utcIsoDateString, utcMonthRangeStrings } from "@/lib/dates"
+import { formatYearMonthYm, utcIsoDateString, utcMonthRangeStrings } from "@/lib/dates"
 import { getDb } from "@/lib/db"
 import {
   allocationStrategies,
   allocationTargets,
   assets,
   expenseCategories,
+  expenseLines,
   expenseRecords,
   goals,
+  incomeLines,
   incomeRecords,
   liabilities,
 } from "@/lib/db/schema"
 import { subtractSeriesFromChartPoints } from "@/lib/fi/chart-adjust"
 import {
+  calcBlendedReturn,
+  calcCoastFiNumber,
   fundingShortfall,
   isGoalFundable,
   monthsFromTodayToFi,
@@ -29,6 +39,7 @@ import {
 } from "@/lib/fi"
 import type { ChartPoint, EngineAllocationInput, EngineAssetInput } from "@/lib/fi/types"
 import { formatGoalListLabel } from "@/lib/goals/labels"
+import { dashboardRoutes } from "@/lib/routes"
 
 export type SummaryViewModel = {
   goalFundable: boolean | null
@@ -36,6 +47,9 @@ export type SummaryViewModel = {
   netWorth: number
   monthsToFi: number | null
   requiredPrincipal: number | null
+  coastFiNumber: number | null
+  coastFiProgress: number | null
+  coastFiReachedMonth: string | null
   assumedWithdrawalRate: number
   chartSeries: ChartPoint[]
   reportingGoalId: string | null
@@ -44,6 +58,13 @@ export type SummaryViewModel = {
   reportingCurrency: string
   fxAsOfDate: string | null
   fxWarning: string | null
+  monthlyInvestable: number | null
+  currentMonthActualInvestable: number | null
+  monthlyInvestableFallbackMessage: string | null
+  staleLiabilityNames: string[]
+  liabilitiesWithNoPaydownTracking: { id: string; name: string; balance: number }[]
+  paydownDivergenceNotes: string[]
+  setupIssues: { message: string; href: string }[]
 }
 
 export type SummaryGoalOption = {
@@ -67,6 +88,9 @@ function emptySummary(): SummaryViewModel {
     netWorth: 0,
     monthsToFi: null,
     requiredPrincipal: null,
+    coastFiNumber: null,
+    coastFiProgress: null,
+    coastFiReachedMonth: null,
     assumedWithdrawalRate: 0.04,
     chartSeries: [],
     reportingGoalId: null,
@@ -74,6 +98,20 @@ function emptySummary(): SummaryViewModel {
     reportingCurrency: "AED",
     fxAsOfDate: null,
     fxWarning: null,
+    monthlyInvestable: null,
+    currentMonthActualInvestable: null,
+    monthlyInvestableFallbackMessage: null,
+    staleLiabilityNames: [],
+    liabilitiesWithNoPaydownTracking: [],
+    paydownDivergenceNotes: [],
+    setupIssues: [],
+  }
+}
+
+function buildSummary(overrides: Partial<SummaryViewModel>): SummaryViewModel {
+  return {
+    ...emptySummary(),
+    ...overrides,
   }
 }
 
@@ -198,25 +236,27 @@ export async function getFiPlanPageData(opts?: {
     const fiDate = new Date(`${goal.fiDate}T12:00:00Z`)
     const today = new Date()
     const todayStr = utcIsoDateString(today)
+    const monthsToFi = monthsFromTodayToFi(today, fiDate)
+    const finiteReq = Number.isFinite(req)
+    const currentMonthLabel = formatYearMonthYm(today.getUTCFullYear(), today.getUTCMonth())
 
     const fx = await loadRatesOnOrBefore(db, todayStr)
     if (!fx) {
       return {
-        summary: {
+        summary: buildSummary({
           goalFundable: null,
           shortfall: null,
           netWorth: 0,
-          monthsToFi: monthsFromTodayToFi(today, fiDate),
-          requiredPrincipal: Number.isFinite(req) ? req : null,
+          monthsToFi,
+          requiredPrincipal: finiteReq ? req : null,
           assumedWithdrawalRate: withdrawalRate,
-          chartSeries: [],
           reportingGoalId: goal.id,
           goalFiDate: goal.fiDate,
           reportingCurrency: goalCurrency,
           fxAsOfDate: null,
           fxWarning:
             "No FX rates available (migrations applied?). Dashboard load normally refreshes rates from Frankfurter; check network or run pnpm fx:sync.",
-        },
+        }),
         goalOptions,
         monthlyInvestable: null,
         projectedNetWorthAtFi: null,
@@ -227,10 +267,13 @@ export async function getFiPlanPageData(opts?: {
     const rates = fx.rates
     const assetRows = await db.select().from(assets)
     const liabilityRows = await db.select().from(liabilities)
-    const debtPaymentCategoryRows = await db
-      .select()
-      .from(expenseCategories)
-      .where(eq(expenseCategories.cashFlowType, "debt_payment"))
+    const incomeLineRows = await db.select().from(incomeLines)
+    const expenseCategoryRows = await db.select().from(expenseCategories)
+    const expenseLineRows = await db.select().from(expenseLines)
+    const debtPaymentLineRows = expenseLineRows.filter((row) => !!row.linkedLiabilityId)
+    const regularExpenseCategoryRows = expenseCategoryRows.filter(
+      (row) => row.cashFlowType !== "debt_payment" && !isInternalDebtCategoryName(row.name),
+    )
 
     let grossAssetsGoal = 0
     for (const a of assetRows) {
@@ -239,20 +282,19 @@ export async function getFiPlanPageData(opts?: {
       const conv = convertAmount(raw, cur, goalCurrency, rates)
       if (conv == null) {
         return {
-          summary: {
+          summary: buildSummary({
             goalFundable: null,
             shortfall: null,
             netWorth: 0,
-            monthsToFi: monthsFromTodayToFi(today, fiDate),
-            requiredPrincipal: Number.isFinite(req) ? req : null,
+            monthsToFi,
+            requiredPrincipal: finiteReq ? req : null,
             assumedWithdrawalRate: withdrawalRate,
-            chartSeries: [],
             reportingGoalId: goal.id,
             goalFiDate: goal.fiDate,
             reportingCurrency: goalCurrency,
             fxAsOfDate: fx.asOfDate,
             fxWarning: `Could not convert ${cur} to ${goalCurrency}. Check Frankfurter supports both codes.`,
-          },
+          }),
           goalOptions,
           monthlyInvestable: null,
           projectedNetWorthAtFi: null,
@@ -262,28 +304,28 @@ export async function getFiPlanPageData(opts?: {
       grossAssetsGoal += conv
     }
 
+    const { start, end } = utcMonthRangeStrings(today)
     const debtPaymentByLiabilityGoal = new Map<string, number>()
-    for (const cat of debtPaymentCategoryRows) {
-      if (!cat.linkedLiabilityId) continue
-      const { currency, amount } = monthlyPlannedForExpenseCategory(cat)
+    for (const line of debtPaymentLineRows) {
+      if (!line.linkedLiabilityId) continue
+      const { currency, amount } = monthlyPlannedForLine(line, start, end)
       if (!Number.isFinite(amount) || amount <= 0) continue
       const conv = convertAmount(amount, currency, goalCurrency, rates)
       if (conv == null) {
         return {
-          summary: {
+          summary: buildSummary({
             goalFundable: null,
             shortfall: null,
             netWorth: 0,
-            monthsToFi: monthsFromTodayToFi(today, fiDate),
-            requiredPrincipal: Number.isFinite(req) ? req : null,
+            monthsToFi,
+            requiredPrincipal: finiteReq ? req : null,
             assumedWithdrawalRate: withdrawalRate,
-            chartSeries: [],
             reportingGoalId: goal.id,
             goalFiDate: goal.fiDate,
             reportingCurrency: goalCurrency,
             fxAsOfDate: fx.asOfDate,
             fxWarning: `Could not convert debt payment from ${currency} to ${goalCurrency}.`,
-          },
+          }),
           goalOptions,
           monthlyInvestable: null,
           projectedNetWorthAtFi: null,
@@ -291,8 +333,8 @@ export async function getFiPlanPageData(opts?: {
         }
       }
       debtPaymentByLiabilityGoal.set(
-        cat.linkedLiabilityId,
-        (debtPaymentByLiabilityGoal.get(cat.linkedLiabilityId) ?? 0) + conv,
+        line.linkedLiabilityId,
+        (debtPaymentByLiabilityGoal.get(line.linkedLiabilityId) ?? 0) + conv,
       )
     }
 
@@ -305,20 +347,19 @@ export async function getFiPlanPageData(opts?: {
       const conv = convertAmount(raw, cur, goalCurrency, rates)
       if (conv == null) {
         return {
-          summary: {
+          summary: buildSummary({
             goalFundable: null,
             shortfall: null,
             netWorth: grossAssetsGoal,
-            monthsToFi: monthsFromTodayToFi(today, fiDate),
-            requiredPrincipal: Number.isFinite(req) ? req : null,
+            monthsToFi,
+            requiredPrincipal: finiteReq ? req : null,
             assumedWithdrawalRate: withdrawalRate,
-            chartSeries: [],
             reportingGoalId: goal.id,
             goalFiDate: goal.fiDate,
             reportingCurrency: goalCurrency,
             fxAsOfDate: fx.asOfDate,
             fxWarning: `Could not convert liability from ${cur} to ${goalCurrency}.`,
-          },
+          }),
           goalOptions,
           monthlyInvestable: null,
           projectedNetWorthAtFi: null,
@@ -357,7 +398,6 @@ export async function getFiPlanPageData(opts?: {
         }))
     }
 
-    const { start, end } = utcMonthRangeStrings(today)
     const incomeRows = await db
       .select()
       .from(incomeRecords)
@@ -373,20 +413,19 @@ export async function getFiPlanPageData(opts?: {
       const v = convertAmount(Number(r.amount), cur, goalCurrency, rates)
       if (v == null) {
         return {
-          summary: {
+          summary: buildSummary({
             goalFundable: null,
             shortfall: null,
             netWorth,
-            monthsToFi: monthsFromTodayToFi(today, fiDate),
-            requiredPrincipal: Number.isFinite(req) ? req : null,
+            monthsToFi,
+            requiredPrincipal: finiteReq ? req : null,
             assumedWithdrawalRate: withdrawalRate,
-            chartSeries: [],
             reportingGoalId: goal.id,
             goalFiDate: goal.fiDate,
             reportingCurrency: goalCurrency,
             fxAsOfDate: fx.asOfDate,
             fxWarning: `Could not convert income from ${cur} to ${goalCurrency}.`,
-          },
+          }),
           goalOptions,
           monthlyInvestable: null,
           projectedNetWorthAtFi: null,
@@ -402,20 +441,19 @@ export async function getFiPlanPageData(opts?: {
       const v = convertAmount(Number(r.amount), cur, goalCurrency, rates)
       if (v == null) {
         return {
-          summary: {
+          summary: buildSummary({
             goalFundable: null,
             shortfall: null,
             netWorth,
-            monthsToFi: monthsFromTodayToFi(today, fiDate),
-            requiredPrincipal: Number.isFinite(req) ? req : null,
+            monthsToFi,
+            requiredPrincipal: finiteReq ? req : null,
             assumedWithdrawalRate: withdrawalRate,
-            chartSeries: [],
             reportingGoalId: goal.id,
             goalFiDate: goal.fiDate,
             reportingCurrency: goalCurrency,
             fxAsOfDate: fx.asOfDate,
             fxWarning: `Could not convert expense from ${cur} to ${goalCurrency}.`,
-          },
+          }),
           goalOptions,
           monthlyInvestable: null,
           projectedNetWorthAtFi: null,
@@ -425,7 +463,97 @@ export async function getFiPlanPageData(opts?: {
       expenseConv += v
     }
 
-    const monthlyInvestable = Math.max(0, incomeConv - expenseConv)
+    const currentMonthActualInvestable = Math.max(0, incomeConv - expenseConv)
+    let plannedIncome = 0
+    for (const line of incomeLineRows) {
+      const { currency, amount } = monthlyPlannedForLine(line, start, end)
+      const conv = convertAmount(amount, currency, goalCurrency, rates)
+      if (conv == null) {
+        return {
+          summary: buildSummary({
+            goalFundable: null,
+            shortfall: null,
+            netWorth,
+            monthsToFi,
+            requiredPrincipal: finiteReq ? req : null,
+            assumedWithdrawalRate: withdrawalRate,
+            reportingGoalId: goal.id,
+            goalFiDate: goal.fiDate,
+            reportingCurrency: goalCurrency,
+            fxAsOfDate: fx.asOfDate,
+            fxWarning: `Could not convert planned income from ${currency} to ${goalCurrency}.`,
+          }),
+          goalOptions,
+          monthlyInvestable: null,
+          projectedNetWorthAtFi: null,
+          summaryCurrencyOptions: BUDGET_SUMMARY_CURRENCIES,
+        }
+      }
+      plannedIncome += conv
+    }
+    let plannedExpense = 0
+    for (const cat of regularExpenseCategoryRows) {
+      const { currency, amount } = monthlyPlannedForExpenseCategory(cat)
+      const conv = convertAmount(amount, currency, goalCurrency, rates)
+      if (conv == null) {
+        return {
+          summary: buildSummary({
+            goalFundable: null,
+            shortfall: null,
+            netWorth,
+            monthsToFi,
+            requiredPrincipal: finiteReq ? req : null,
+            assumedWithdrawalRate: withdrawalRate,
+            reportingGoalId: goal.id,
+            goalFiDate: goal.fiDate,
+            reportingCurrency: goalCurrency,
+            fxAsOfDate: fx.asOfDate,
+            fxWarning: `Could not convert planned expense from ${currency} to ${goalCurrency}.`,
+          }),
+          goalOptions,
+          monthlyInvestable: null,
+          projectedNetWorthAtFi: null,
+          summaryCurrencyOptions: BUDGET_SUMMARY_CURRENCIES,
+        }
+      }
+      plannedExpense += conv
+    }
+    for (const line of debtPaymentLineRows) {
+      const { currency, amount } = monthlyPlannedForLine(line, start, end)
+      const conv = convertAmount(amount, currency, goalCurrency, rates)
+      if (conv == null) {
+        return {
+          summary: buildSummary({
+            goalFundable: null,
+            shortfall: null,
+            netWorth,
+            monthsToFi,
+            requiredPrincipal: finiteReq ? req : null,
+            assumedWithdrawalRate: withdrawalRate,
+            reportingGoalId: goal.id,
+            goalFiDate: goal.fiDate,
+            reportingCurrency: goalCurrency,
+            fxAsOfDate: fx.asOfDate,
+            fxWarning: `Could not convert planned debt payment from ${currency} to ${goalCurrency}.`,
+          }),
+          goalOptions,
+          monthlyInvestable: null,
+          projectedNetWorthAtFi: null,
+          summaryCurrencyOptions: BUDGET_SUMMARY_CURRENCIES,
+        }
+      }
+      plannedExpense += conv
+    }
+    const hasRecurringRules =
+      incomeLineRows.some((line) => line.isRecurring) ||
+      regularExpenseCategoryRows.some((cat) => cat.isRecurring) ||
+      debtPaymentLineRows.some((line) => line.isRecurring)
+    const monthlyInvestableFallbackMessage = hasRecurringRules
+      ? null
+      : "No recurring income or expense rules are set up. The projection is using this month's actual records. Set up recurring amounts in Cash Flow for a more stable projection."
+    const monthlyInvestable = hasRecurringRules
+      ? Math.max(0, plannedIncome - plannedExpense)
+      : currentMonthActualInvestable
     const engineAssets: EngineAssetInput[] = []
     for (const a of assetRows) {
       if (!a.includeInFiProjection) continue
@@ -434,20 +562,19 @@ export async function getFiPlanPageData(opts?: {
       const balConv = convertAmount(bal, cur, goalCurrency, rates)
       if (balConv == null) {
         return {
-          summary: {
+          summary: buildSummary({
             goalFundable: null,
             shortfall: null,
             netWorth,
-            monthsToFi: monthsFromTodayToFi(today, fiDate),
-            requiredPrincipal: Number.isFinite(req) ? req : null,
+            monthsToFi,
+            requiredPrincipal: finiteReq ? req : null,
             assumedWithdrawalRate: withdrawalRate,
-            chartSeries: [],
             reportingGoalId: goal.id,
             goalFiDate: goal.fiDate,
             reportingCurrency: goalCurrency,
             fxAsOfDate: fx.asOfDate,
             fxWarning: `Could not convert asset balance from ${cur}.`,
-          },
+          }),
           goalOptions,
           monthlyInvestable: null,
           projectedNetWorthAtFi: null,
@@ -459,20 +586,19 @@ export async function getFiPlanPageData(opts?: {
         termConv = convertAmount(Number(a.assumedTerminalValue), cur, goalCurrency, rates) ?? null
         if (termConv == null) {
           return {
-            summary: {
+            summary: buildSummary({
               goalFundable: null,
               shortfall: null,
               netWorth,
-              monthsToFi: monthsFromTodayToFi(today, fiDate),
-              requiredPrincipal: Number.isFinite(req) ? req : null,
+              monthsToFi,
+              requiredPrincipal: finiteReq ? req : null,
               assumedWithdrawalRate: withdrawalRate,
-              chartSeries: [],
               reportingGoalId: goal.id,
               goalFiDate: goal.fiDate,
               reportingCurrency: goalCurrency,
               fxAsOfDate: fx.asOfDate,
               fxWarning: `Could not convert terminal value from ${cur}.`,
-            },
+            }),
             goalOptions,
             monthlyInvestable: null,
             projectedNetWorthAtFi: null,
@@ -492,6 +618,18 @@ export async function getFiPlanPageData(opts?: {
         }),
       )
     }
+
+    const currentFiScopedNetWorth =
+      engineAssets.reduce((sum, asset) => sum + asset.currentBalance, 0) - liabilityTotalGoal
+    const blendedAnnualReturn = calcBlendedReturn(engineAssets)
+    const coastFiNumberGoal =
+      finiteReq && monthsToFi != null && monthsToFi > 0 && blendedAnnualReturn != null
+        ? calcCoastFiNumber({
+            requiredPrincipal: req,
+            monthsToFiDate: monthsToFi,
+            blendedAnnualReturn,
+          })
+        : null
 
     const { points, finalProjectedTotal: grossFinalProjected } = projectPortfolio({
       startDate: today,
@@ -518,8 +656,104 @@ export async function getFiPlanPageData(opts?: {
     const chartSeries = subtractSeriesFromChartPoints(points, liabilityOffsets)
     const finalProjectedLiability = liabilityOffsets[liabilityOffsets.length - 1] ?? liabilityTotalGoal
     const finalProjectedNet = grossFinalProjected - finalProjectedLiability
+    const coastFiReachedMonthGoal =
+      coastFiNumberGoal == null
+        ? null
+        : currentFiScopedNetWorth >= coastFiNumberGoal
+          ? currentMonthLabel
+          : chartSeries.find((point) => point.projectedTotal >= coastFiNumberGoal)?.label ?? null
+    const coastFiProgressGoal =
+      coastFiNumberGoal != null && coastFiNumberGoal > 0
+        ? Math.max(0, Math.min(1, currentFiScopedNetWorth / coastFiNumberGoal))
+        : null
+    const sixtyDaysAgo = new Date(today)
+    sixtyDaysAgo.setUTCDate(sixtyDaysAgo.getUTCDate() - 60)
+    const staleLiabilityNames = liabilityRows
+      .filter(
+        (row) =>
+          (row.trackingMode ?? "fixed_installment") === "fixed_installment" &&
+          row.updatedAt < sixtyDaysAgo,
+      )
+      .map((row) => row.name)
+    const trackedLiabilityIds = new Set(debtPaymentByLiabilityGoal.keys())
+    const liabilitiesWithNoPaydownTracking = liabilityRows
+      .filter(
+        (row) =>
+          (row.trackingMode ?? "fixed_installment") === "fixed_installment" &&
+          !trackedLiabilityIds.has(row.id),
+      )
+      .map((row) => ({
+        id: row.id,
+        name: row.name,
+        balance: liabilityStartsGoal.get(row.id) ?? 0,
+      }))
+    const recentPaydownCutoff = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 2, 1))
+      .toISOString()
+      .slice(0, 10)
+    const recentAppliedPaydowns = await db
+      .select({
+        appliedLiabilityId: expenseRecords.appliedLiabilityId,
+        appliedLiabilityAmount: expenseRecords.appliedLiabilityAmount,
+        currency: expenseRecords.currency,
+      })
+      .from(expenseRecords)
+      .where(
+        and(
+          gte(expenseRecords.occurredOn, recentPaydownCutoff),
+          lte(expenseRecords.occurredOn, end),
+        ),
+      )
+    const actualAvgPaydownByLiabilityGoal = new Map<string, number>()
+    for (const row of recentAppliedPaydowns) {
+      if (!row.appliedLiabilityId) continue
+      const amount = Number(row.appliedLiabilityAmount ?? 0)
+      if (!Number.isFinite(amount) || amount <= 0) continue
+      const conv = convertAmount(amount, row.currency ?? "USD", goalCurrency, rates)
+      if (conv == null) continue
+      actualAvgPaydownByLiabilityGoal.set(
+        row.appliedLiabilityId,
+        (actualAvgPaydownByLiabilityGoal.get(row.appliedLiabilityId) ?? 0) + conv / 3,
+      )
+    }
+    const paydownDivergenceNotes = liabilityRows.flatMap((row) => {
+      if ((row.trackingMode ?? "fixed_installment") !== "fixed_installment") return []
+      const planned = debtPaymentByLiabilityGoal.get(row.id) ?? 0
+      const actual = actualAvgPaydownByLiabilityGoal.get(row.id) ?? 0
+      if (planned <= 0 || actual <= 0) return []
+      const delta = Math.abs(planned - actual) / planned
+      if (delta <= 0.2) return []
+      return [
+        `${row.name} is projected at ${planned.toFixed(0)}/${goalCurrency} per month, but the last 3 months averaged ${actual.toFixed(0)}/${goalCurrency}.`,
+      ]
+    })
+    const rawSetupIssues: { message: string; href: string }[] = []
+    if (!strategy) {
+      rawSetupIssues.push({
+        message: "No active allocation strategy is configured.",
+        href: dashboardRoutes.netWorth,
+      })
+    } else {
+      const rawWeightSum = allocations.reduce((sum, row) => sum + row.weightPercent, 0)
+      if (rawWeightSum > 0 && Math.abs(rawWeightSum - 100) > 0.01) {
+        rawSetupIssues.push({
+          message: `Allocation weights sum to ${rawWeightSum.toFixed(1)}%.`,
+          href: dashboardRoutes.netWorth,
+        })
+      }
+    }
+    for (const row of liabilitiesWithNoPaydownTracking) {
+      rawSetupIssues.push({
+        message: `${row.name} has no debt payment line.`,
+        href: dashboardRoutes.cashFlow,
+      })
+    }
+    for (const name of staleLiabilityNames) {
+      rawSetupIssues.push({
+        message: `${name} balance may be stale.`,
+        href: dashboardRoutes.netWorth,
+      })
+    }
 
-    const finiteReq = Number.isFinite(req)
     const fundable = finiteReq ? isGoalFundable(finalProjectedNet, req) : null
     const shortfall =
       finiteReq && fundable === false ? fundingShortfall(finalProjectedNet, req) : null
@@ -527,11 +761,16 @@ export async function getFiPlanPageData(opts?: {
     let displayNetWorth = netWorth
     let displayShortfall = shortfall
     let displayRequiredPrincipal = finiteReq ? req : null
+    let displayCoastFiNumber = coastFiNumberGoal
+    let displayCoastFiProgress = coastFiProgressGoal
+    let displayCoastFiReachedMonth = coastFiReachedMonthGoal
     let displayChart = chartSeries
     let displayMonthlyInvestable = monthlyInvestable
+    let displayCurrentMonthActualInvestable = currentMonthActualInvestable
     let displayProjectedNet = finalProjectedNet
     let displayReportingCcy = goalCurrency
     let displayFxWarning: string | null = null
+    let displayLiabilitiesWithNoPaydownTracking = liabilitiesWithNoPaydownTracking
 
     if (reportingCurrency !== goalCurrency) {
       const c = (n: number): number | null => {
@@ -548,13 +787,22 @@ export async function getFiPlanPageData(opts?: {
         const nw = c(netWorth)
         const rp = finiteReq ? c(req) : null
         const sf = shortfall != null ? c(shortfall) : null
+        const coast = coastFiNumberGoal != null ? c(coastFiNumberGoal) : null
         const mi = c(monthlyInvestable)
+        const actualMi = c(currentMonthActualInvestable)
         const pn = c(finalProjectedNet)
+        const convertedUntracked = liabilitiesWithNoPaydownTracking.map((row) => {
+          const balance = c(row.balance)
+          return balance == null ? null : { ...row, balance }
+        })
         if (
           nw == null ||
           (finiteReq && rp == null) ||
           (shortfall != null && sf == null) ||
+          (coastFiNumberGoal != null && coast == null) ||
           mi == null ||
+          actualMi == null ||
+          convertedUntracked.some((row) => row == null) ||
           pn == null
         ) {
           displayFxWarning = `Could not convert totals from ${goalCurrency} to ${reportingCurrency}.`
@@ -562,21 +810,29 @@ export async function getFiPlanPageData(opts?: {
           displayNetWorth = nw
           displayShortfall = sf
           displayRequiredPrincipal = rp
+          displayCoastFiNumber = coast
+          displayCoastFiProgress = coastFiProgressGoal
+          displayCoastFiReachedMonth = coastFiReachedMonthGoal
           displayChart = convChart as ChartPoint[]
           displayMonthlyInvestable = mi
+          displayCurrentMonthActualInvestable = actualMi
           displayProjectedNet = pn
           displayReportingCcy = reportingCurrency
+          displayLiabilitiesWithNoPaydownTracking = convertedUntracked as typeof liabilitiesWithNoPaydownTracking
         }
       }
     }
 
     return {
-      summary: {
+      summary: buildSummary({
         goalFundable: fundable,
         shortfall: displayShortfall,
         netWorth: displayNetWorth,
-        monthsToFi: monthsFromTodayToFi(today, fiDate),
+        monthsToFi,
         requiredPrincipal: displayRequiredPrincipal,
+        coastFiNumber: displayCoastFiNumber,
+        coastFiProgress: displayCoastFiProgress,
+        coastFiReachedMonth: displayCoastFiReachedMonth,
         assumedWithdrawalRate: withdrawalRate,
         chartSeries: displayChart,
         reportingGoalId: goal.id,
@@ -584,7 +840,14 @@ export async function getFiPlanPageData(opts?: {
         reportingCurrency: displayReportingCcy,
         fxAsOfDate: fx.asOfDate,
         fxWarning: displayFxWarning,
-      },
+        monthlyInvestable: displayMonthlyInvestable,
+        currentMonthActualInvestable: displayCurrentMonthActualInvestable,
+        monthlyInvestableFallbackMessage,
+        staleLiabilityNames,
+        liabilitiesWithNoPaydownTracking: displayLiabilitiesWithNoPaydownTracking,
+        paydownDivergenceNotes,
+        setupIssues: rawSetupIssues,
+      }),
       goalOptions,
       monthlyInvestable: displayMonthlyInvestable,
       projectedNetWorthAtFi: displayProjectedNet,

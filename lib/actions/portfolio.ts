@@ -1,9 +1,10 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
-import { and, desc, eq, gte, lte, sql } from "drizzle-orm"
+import { and, desc, eq, gte, inArray, lte, sql } from "drizzle-orm"
 
 import { err, ok, type ActionResult } from "@/lib/action-result"
+import { INTERNAL_DEBT_CATEGORY_NAME } from "@/lib/budget/debt-payment"
 import { resolveBudgetSummaryCurrency } from "@/lib/budget/summary-currency"
 import { convertAmount } from "@/lib/currency/convert"
 import { loadRatesOnOrBefore } from "@/lib/currency/rates"
@@ -18,6 +19,8 @@ import {
   allocationStrategies,
   allocationTargets,
   assets,
+  expenseCategories,
+  expenseLines,
   expenseRecords,
   goals,
   incomeRecords,
@@ -59,6 +62,24 @@ function isUniqueSecuredAssetError(e: unknown): boolean {
   return false
 }
 
+function isLockTimeoutError(e: unknown): boolean {
+  const chain: unknown[] = [e]
+  let cur: unknown = e
+  for (let i = 0; i < 5 && cur && typeof cur === "object" && "cause" in cur; i++) {
+    cur = (cur as { cause: unknown }).cause
+    chain.push(cur)
+  }
+  for (const err of chain) {
+    if (!err || typeof err !== "object") continue
+    const o = err as { code?: string; message?: string }
+    if (o.code === "55P03") return true
+    if (typeof o.message === "string" && /lock timeout|lock not available/i.test(o.message)) {
+      return true
+    }
+  }
+  return false
+}
+
 function sumConvertedRecordAmounts(args: {
   rows: { amount: string; currency: string | null }[]
   reportingCurrency: string
@@ -72,6 +93,83 @@ function sumConvertedRecordAmounts(args: {
     total += converted
   }
   return total
+}
+
+type AllocationInsertRow = {
+  assetId: string
+  amount: string
+  allocatedOn: string
+  createdAt: Date
+}
+
+type AppDb = NonNullable<ReturnType<typeof getDb>>
+type AppTx = Parameters<Parameters<AppDb["transaction"]>[0]>[0]
+
+type DeleteConfirmationData = {
+  requiresConfirmation: true
+  message: string
+  affectedCategoryNames?: string[]
+  affectedStrategyCount?: number
+}
+
+function normalizeDeleteInput(input: string | { id: string; force?: boolean }) {
+  return typeof input === "string" ? { id: input, force: false } : input
+}
+
+async function ensureInternalDebtCategory(
+  tx: AppTx,
+): Promise<string> {
+  const [existing] = await tx
+    .select({ id: expenseCategories.id })
+    .from(expenseCategories)
+    .where(eq(expenseCategories.name, INTERNAL_DEBT_CATEGORY_NAME))
+    .limit(1)
+  if (existing) return existing.id
+  const [created] = await tx
+    .insert(expenseCategories)
+    .values({
+      name: INTERNAL_DEBT_CATEGORY_NAME,
+      sortOrder: 999999,
+      cashFlowType: "expense",
+      linkedLiabilityId: null,
+      isRecurring: false,
+      recurringCurrency: "USD",
+      createdAt: new Date(),
+    })
+    .returning({ id: expenseCategories.id })
+  return created.id
+}
+
+async function createLinkedDebtPaymentLine(
+  tx: AppTx,
+  input: { liabilityId: string; liabilityName: string; currency: string },
+) {
+  const categoryId = await ensureInternalDebtCategory(tx)
+  await tx.insert(expenseLines).values({
+    categoryId,
+    name: input.liabilityName.trim() || "Debt payment",
+    linkedLiabilityId: input.liabilityId,
+    isRecurring: false,
+    recurringCurrency: input.currency,
+    createdAt: new Date(),
+  })
+}
+
+async function insertAllocationRowsAndUpdateBalances(
+  tx: AppTx,
+  rows: AllocationInsertRow[],
+) {
+  if (rows.length === 0) return
+  await tx.insert(allocationRecords).values(rows)
+  for (const row of rows) {
+    await tx
+      .update(assets)
+      .set({
+        currentBalance: sql`${assets.currentBalance} + ${row.amount}`,
+        updatedAt: new Date(),
+      })
+      .where(eq(assets.id, row.assetId))
+  }
 }
 
 function toDbAsset(v: {
@@ -131,7 +229,9 @@ export async function createAsset(input: unknown): Promise<ActionResult<{ id: st
         })
         .returning({ id: assets.id })
       if (securedLiability) {
-        await tx.insert(liabilities).values({
+        const [liabilityRow] = await tx
+          .insert(liabilities)
+          .values({
           name: securedLiability.name,
           liabilityType: securedLiability.liabilityType?.trim() || null,
           trackingMode: securedLiability.trackingMode,
@@ -140,11 +240,22 @@ export async function createAsset(input: unknown): Promise<ActionResult<{ id: st
           securedByAssetId: a.id,
           createdAt: new Date(),
           updatedAt: new Date(),
-        })
+          })
+          .returning({ id: liabilities.id })
+        if (securedLiability.autoCreateBudgetCategory) {
+          await createLinkedDebtPaymentLine(tx, {
+            liabilityId: liabilityRow.id,
+            liabilityName: securedLiability.name,
+            currency: securedLiability.currency,
+          })
+        }
       }
       return a.id
     })
     rev()
+    if (securedLiability?.autoCreateBudgetCategory) {
+      revalidatePath(dashboardRoutes.cashFlow)
+    }
     return ok({ id })
   } catch (e) {
     if (isUniqueSecuredAssetError(e)) {
@@ -210,9 +321,25 @@ export async function updateAsset(input: unknown): Promise<ActionResult> {
   }
 }
 
-export async function deleteAsset(id: string): Promise<ActionResult> {
+export async function deleteAsset(
+  input: string | { id: string; force?: boolean },
+): Promise<ActionResult<DeleteConfirmationData>> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
+  const { id, force = false } = normalizeDeleteInput(input)
+  if (!force) {
+    const targets = await db
+      .select({ strategyId: allocationTargets.strategyId })
+      .from(allocationTargets)
+      .where(eq(allocationTargets.assetId, id))
+    if (targets.length > 0) {
+      return ok({
+        requiresConfirmation: true,
+        message: `This asset has allocation targets in ${targets.length} strateg${targets.length === 1 ? "y" : "ies"}. Deleting it will remove those targets and may leave your weights misaligned.`,
+        affectedStrategyCount: targets.length,
+      })
+    }
+  }
   await db.delete(liabilities).where(eq(liabilities.securedByAssetId, id))
   await db.delete(assets).where(eq(assets.id, id))
   rev()
@@ -241,20 +368,33 @@ export async function createLiability(input: unknown): Promise<ActionResult<{ id
     if (!a) return err("Secured asset not found.")
   }
   try {
-    const [row] = await db
-      .insert(liabilities)
-      .values({
-        name: v.name,
-        liabilityType: v.liabilityType?.trim() || null,
-        trackingMode: v.trackingMode,
-        currency: v.currency,
-        currentBalance: v.currentBalance.toFixed(2),
-        securedByAssetId,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .returning({ id: liabilities.id })
+    const row = await db.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(liabilities)
+        .values({
+          name: v.name,
+          liabilityType: v.liabilityType?.trim() || null,
+          trackingMode: v.trackingMode,
+          currency: v.currency,
+          currentBalance: v.currentBalance.toFixed(2),
+          securedByAssetId,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .returning({ id: liabilities.id })
+      if (v.autoCreateBudgetCategory) {
+        await createLinkedDebtPaymentLine(tx, {
+          liabilityId: created.id,
+          liabilityName: v.name,
+          currency: v.currency,
+        })
+      }
+      return created
+    })
     rev()
+    if (v.autoCreateBudgetCategory) {
+      revalidatePath(dashboardRoutes.cashFlow)
+    }
     return ok({ id: row.id })
   } catch (e) {
     if (isUniqueSecuredAssetError(e)) {
@@ -278,32 +418,55 @@ export async function updateLiability(input: unknown): Promise<ActionResult> {
     if (!a) return err("Secured asset not found.")
   }
   try {
-    await db
-      .update(liabilities)
-      .set({
-        name: rest.name,
-        liabilityType: rest.liabilityType?.trim() || null,
-        trackingMode: rest.trackingMode,
-        currency: rest.currency,
-        currentBalance: rest.currentBalance.toFixed(2),
-        securedByAssetId,
-        updatedAt: new Date(),
-      })
-      .where(eq(liabilities.id, id))
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`set local lock_timeout = '5s'`)
+      await tx
+        .update(liabilities)
+        .set({
+          name: rest.name,
+          liabilityType: rest.liabilityType?.trim() || null,
+          trackingMode: rest.trackingMode,
+          currency: rest.currency,
+          currentBalance: rest.currentBalance.toFixed(2),
+          securedByAssetId,
+          updatedAt: new Date(),
+        })
+        .where(eq(liabilities.id, id))
+    })
     rev()
     return ok()
   } catch (e) {
     if (isUniqueSecuredAssetError(e)) {
       return err("Another liability is already linked to that asset.")
     }
+    if (isLockTimeoutError(e)) {
+      return err("This liability is currently locked by another request. Please wait a few seconds and try again.")
+    }
     throw e
   }
 }
 
-export async function deleteLiability(id: string): Promise<ActionResult> {
+export async function deleteLiability(
+  input: string | { id: string; force?: boolean },
+): Promise<ActionResult<DeleteConfirmationData>> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
+  const { id, force = false } = normalizeDeleteInput(input)
+  if (!force) {
+    const linked = await db
+      .select({ id: expenseLines.id, name: expenseLines.name })
+      .from(expenseLines)
+      .where(eq(expenseLines.linkedLiabilityId, id))
+    if (linked.length > 0) {
+      return ok({
+        requiresConfirmation: true,
+        message: `${linked.map((row) => `"${row.name}"`).join(", ")} in Cash Flow ${linked.length === 1 ? "is" : "are"} linked to this liability. Deleting it will leave ${linked.length === 1 ? "that debt payment line" : "those debt payment lines"} unlinked.`,
+        affectedCategoryNames: linked.map((row) => row.name),
+      })
+    }
+  }
   await db.delete(liabilities).where(eq(liabilities.id, id))
+  revalidatePath(dashboardRoutes.cashFlow)
   rev()
   return ok()
 }
@@ -426,15 +589,31 @@ export async function createAllocationRecord(
   if (!assetRow.includeInFiProjection) {
     return err("Allocation records apply to assets in your FI plan only.")
   }
-  const [row] = await db
-    .insert(allocationRecords)
-    .values({
-      assetId: v.assetId,
-      amount: v.amount.toFixed(2),
-      allocatedOn: v.allocatedOn,
-      createdAt: new Date(),
-    })
-    .returning({ id: allocationRecords.id })
+  const [row] = await db.transaction(async (tx) => {
+    const rowsToInsert: AllocationInsertRow[] = [
+      {
+        assetId: v.assetId,
+        amount: v.amount.toFixed(2),
+        allocatedOn: v.allocatedOn,
+        createdAt: new Date(),
+      },
+    ]
+    const created = await tx
+      .insert(allocationRecords)
+      .values(rowsToInsert)
+      .returning({ id: allocationRecords.id, assetId: allocationRecords.assetId, amount: allocationRecords.amount })
+    for (const createdRow of created) {
+      await tx
+        .update(assets)
+        .set({
+          currentBalance: sql`${assets.currentBalance} + ${createdRow.amount}`,
+          updatedAt: new Date(),
+        })
+        .where(eq(assets.id, createdRow.assetId))
+    }
+    return created
+  })
+  if (!row) return err("Allocation record could not be created.")
   rev()
   return ok({ id: row.id })
 }
@@ -442,7 +621,28 @@ export async function createAllocationRecord(
 export async function deleteAllocationRecord(id: string): Promise<ActionResult> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
-  await db.delete(allocationRecords).where(eq(allocationRecords.id, id))
+  const deleted = await db.transaction(async (tx) => {
+    const [record] = await tx
+      .select({
+        id: allocationRecords.id,
+        assetId: allocationRecords.assetId,
+        amount: allocationRecords.amount,
+      })
+      .from(allocationRecords)
+      .where(eq(allocationRecords.id, id))
+      .limit(1)
+    if (!record) return false
+    await tx
+      .update(assets)
+      .set({
+        currentBalance: sql`GREATEST(${assets.currentBalance} - ${record.amount}, 0)`,
+        updatedAt: new Date(),
+      })
+      .where(eq(assets.id, record.assetId))
+    await tx.delete(allocationRecords).where(eq(allocationRecords.id, id))
+    return true
+  })
+  if (!deleted) return err("Allocation record not found.")
   rev()
   return ok()
 }
@@ -629,8 +829,26 @@ export async function allocateInvestablePerStrategy(
       return err("All split amounts rounded to zero in asset currencies.")
     }
 
+    const targetAssetIds = rowsToInsert.map((row) => row.assetId)
+    const existingThisMonth = await db
+      .select({ id: allocationRecords.id })
+      .from(allocationRecords)
+      .where(
+        and(
+          gte(allocationRecords.allocatedOn, start),
+          lte(allocationRecords.allocatedOn, allocatedOn),
+          inArray(allocationRecords.assetId, targetAssetIds),
+        ),
+      )
+      .limit(1)
+    if (existingThisMonth.length > 0) {
+      return err(
+        "This month already has allocation records for one or more target assets. Delete the existing records first, or adjust balances manually.",
+      )
+    }
+
     await db.transaction(async (tx) => {
-      await tx.insert(allocationRecords).values(rowsToInsert)
+      await insertAllocationRowsAndUpdateBalances(tx, rowsToInsert)
     })
 
     revalidatePath(dashboardRoutes.cashFlow)

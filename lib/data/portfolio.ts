@@ -1,4 +1,4 @@
-import { asc, desc, eq } from "drizzle-orm"
+import { asc, desc, eq, isNotNull } from "drizzle-orm"
 
 import {
   BUDGET_SUMMARY_CURRENCIES,
@@ -16,6 +16,7 @@ import {
   allocationStrategies,
   allocationTargets,
   assets,
+  expenseLines,
   goals,
   liabilities,
 } from "@/lib/db/schema"
@@ -34,6 +35,15 @@ export type PortfolioLiabilityRow = {
   meta: Record<string, unknown>
   createdAt: Date
   updatedAt: Date
+  hasDebtPaymentLine: boolean
+}
+
+export type AllocationHealthSummary = {
+  strategyName: string | null
+  targetCount: number
+  weightSum: number
+  lastAllocatedOn: string | null
+  canAllocate: boolean
 }
 
 export type PortfolioPageData = {
@@ -79,6 +89,7 @@ export type PortfolioPageData = {
       currentBalance: string
     }
   >
+  allocationHealthSummary: AllocationHealthSummary
 }
 
 function buildSecuredLiabilityByAssetId(
@@ -120,12 +131,24 @@ function emptyPortfolio(): PortfolioPageData {
     fiDateLabel: null,
     portfolioFxWarning: null,
     fxAsOfDate: null,
+    allocationHealthSummary: {
+      strategyName: null,
+      targetCount: 0,
+      weightSum: 0,
+      lastAllocatedOn: null,
+      canAllocate: false,
+    },
   }
 }
 
 type AppDb = NonNullable<ReturnType<typeof getDb>>
 
 async function loadPortfolioLiabilities(db: AppDb): Promise<PortfolioLiabilityRow[]> {
+  const linkedLiabilityIds = await db
+    .select({ id: expenseLines.linkedLiabilityId })
+    .from(expenseLines)
+    .where(isNotNull(expenseLines.linkedLiabilityId))
+  const linkedSet = new Set(linkedLiabilityIds.map((row) => row.id))
   const rows = await db
     .select({
       id: liabilities.id,
@@ -147,6 +170,7 @@ async function loadPortfolioLiabilities(db: AppDb): Promise<PortfolioLiabilityRo
   return rows.map((r) => ({
     ...r,
     meta: (r.meta ?? {}) as Record<string, unknown>,
+    hasDebtPaymentLine: linkedSet.has(r.id),
   }))
 }
 
@@ -213,6 +237,13 @@ export async function getPortfolioData(opts?: {
 
   const liabilityList = await loadPortfolioLiabilities(db)
   const securedLiabilityByAssetId = buildSecuredLiabilityByAssetId(liabilityList)
+  const allocationHealthSummary: AllocationHealthSummary = {
+    strategyName: activeStrategy?.name ?? null,
+    targetCount: targets.length,
+    weightSum: targets.reduce((sum, target) => sum + Number(target.weightPercent), 0),
+    lastAllocatedOn: recordRows[0]?.allocatedOn ?? null,
+    canAllocate: !!activeStrategy && targets.length > 0,
+  }
 
   const [goal] = await db
     .select()
@@ -242,6 +273,7 @@ export async function getPortfolioData(opts?: {
       fiDateLabel: null,
       portfolioFxWarning: null,
       fxAsOfDate: null,
+      allocationHealthSummary,
     }
   }
 
@@ -271,6 +303,7 @@ export async function getPortfolioData(opts?: {
       portfolioFxWarning:
         "No FX rates available — totals and yearly projection need rates (run pnpm fx:sync).",
       fxAsOfDate: null,
+      allocationHealthSummary,
     }
   }
 
@@ -302,6 +335,7 @@ export async function getPortfolioData(opts?: {
         fiDateLabel: goal.fiDate,
         portfolioFxWarning: `Could not convert ${cur} to ${summaryCurrency} for portfolio totals.`,
         fxAsOfDate: fx.asOfDate,
+        allocationHealthSummary,
       }
     }
     currentPositionReporting += conv
@@ -331,6 +365,7 @@ export async function getPortfolioData(opts?: {
         fiDateLabel: goal.fiDate,
         portfolioFxWarning: `Could not convert allocation record from ${cur} to ${summaryCurrency}.`,
         fxAsOfDate: fx.asOfDate,
+        allocationHealthSummary,
       }
     }
     totalInvestedReporting += conv
@@ -361,6 +396,7 @@ export async function getPortfolioData(opts?: {
         fiDateLabel: goal.fiDate,
         portfolioFxWarning: `Could not convert liability from ${cur} to ${summaryCurrency}.`,
         fxAsOfDate: fx.asOfDate,
+        allocationHealthSummary,
       }
     }
     totalLiabilitiesReporting += conv
@@ -401,5 +437,6 @@ export async function getPortfolioData(opts?: {
     fiDateLabel: goal.fiDate,
     portfolioFxWarning,
     fxAsOfDate: summary.fxAsOfDate,
+    allocationHealthSummary,
   }
 }

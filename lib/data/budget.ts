@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, gte, lte } from "drizzle-orm"
 
+import { isInternalDebtCategoryName } from "@/lib/budget/debt-payment"
 import { monthlyPlannedForExpenseCategory, monthlyPlannedForLine } from "@/lib/budget/planned-line"
 import {
   BUDGET_SUMMARY_CURRENCIES,
@@ -29,6 +30,7 @@ import {
   incomeRecords,
   liabilities,
 } from "@/lib/db/schema"
+import { dashboardRoutes } from "@/lib/routes"
 
 /** Per budget line id → per ISO currency → sum for the UTC month (not converted). */
 export type LineNativeMonthTotals = Record<string, Record<string, number>>
@@ -220,6 +222,7 @@ const empty = {
     securedByAssetName: string | null
   }[],
   expenseLines: [] as ((typeof expenseLines.$inferSelect) & { categoryName: string })[],
+  debtPaymentLines: [] as ((typeof expenseLines.$inferSelect) & { categoryName: string })[],
   expenseTransactionsByCategoryId: {} as Record<
     string,
     {
@@ -253,6 +256,16 @@ const empty = {
       currency: string
       weightPercent: number
     }[]
+  } | null,
+  orphanedDebtCategories: [] as {
+    id: string
+    name: string
+  }[],
+  strategyContext: null as {
+    strategyName: string
+    targetCount: number
+    weightSum: number
+    href: string
   } | null,
 }
 
@@ -330,6 +343,12 @@ export async function getBudgetPageData(opts?: {
       id: expenseLines.id,
       categoryId: expenseLines.categoryId,
       name: expenseLines.name,
+      linkedLiabilityId: expenseLines.linkedLiabilityId,
+      isRecurring: expenseLines.isRecurring,
+      frequency: expenseLines.frequency,
+      recurringAmount: expenseLines.recurringAmount,
+      recurringCurrency: expenseLines.recurringCurrency,
+      recurringAnchorDate: expenseLines.recurringAnchorDate,
       createdAt: expenseLines.createdAt,
       categoryName: expenseCategories.name,
     })
@@ -379,6 +398,32 @@ export async function getBudgetPageData(opts?: {
   }
 
   const planUsesSnapshot = isPastMonth && snapshotRows.length > 0
+  const visibleExpenseCategories = cats.filter(
+    (category) =>
+      category.cashFlowType !== "debt_payment" && !isInternalDebtCategoryName(category.name),
+  )
+  const debtPaymentLines = expLinesFull.filter((line) => !!line.linkedLiabilityId)
+  const debtLineIdSet = new Set(debtPaymentLines.map((line) => line.id))
+  const debtCategoryIds = new Set(
+    cats
+      .filter(
+        (category) =>
+          category.cashFlowType === "debt_payment" || isInternalDebtCategoryName(category.name),
+      )
+      .map((category) => category.id),
+  )
+  const debtLineIdByLegacyCategoryId = new Map<string, string>()
+  for (const category of cats) {
+    if (category.cashFlowType !== "debt_payment" || !category.linkedLiabilityId) continue
+    const match =
+      debtPaymentLines.find((line) => line.categoryId === category.id) ??
+      debtPaymentLines.find((line) => line.linkedLiabilityId === category.linkedLiabilityId)
+    if (match) debtLineIdByLegacyCategoryId.set(category.id, match.id)
+  }
+  const isDebtRecord = (record: (typeof expenseRecords.$inferSelect)) =>
+    (record.expenseLineId != null && debtLineIdSet.has(record.expenseLineId)) ||
+    record.appliedLiabilityId != null ||
+    debtCategoryIds.has(record.expenseCategoryId)
 
   const incomeActualByLineNative: LineNativeMonthTotals = {}
   for (const r of monthIncomeRec) {
@@ -405,12 +450,14 @@ export async function getBudgetPageData(opts?: {
   const expenseActualByCategoryNative: LineNativeMonthTotals = {}
   const expenseActualByLineNative: LineNativeMonthTotals = {}
   for (const r of monthExpRec) {
-    bumpNative(
-      expenseActualByCategoryNative,
-      r.expenseCategoryId,
-      r.currency ?? "USD",
-      Number(r.amount),
-    )
+    if (!isDebtRecord(r)) {
+      bumpNative(
+        expenseActualByCategoryNative,
+        r.expenseCategoryId,
+        r.currency ?? "USD",
+        Number(r.amount),
+      )
+    }
     if (r.expenseLineId) {
       bumpNative(expenseActualByLineNative, r.expenseLineId, r.currency ?? "USD", Number(r.amount))
     }
@@ -418,6 +465,7 @@ export async function getBudgetPageData(opts?: {
 
   /** Category id → native currency buckets for planned expense (envelope per category). */
   const expensePlannedByCategoryNative: LineNativeMonthTotals = {}
+  const expensePlannedByLineNative: LineNativeMonthTotals = {}
   const hasExpenseCategorySnap = snapshotRows.some(
     (r) => r.lineKind === "expense_category" && r.expenseCategoryId,
   )
@@ -426,11 +474,18 @@ export async function getBudgetPageData(opts?: {
   if (isPastMonth && hasExpenseCategorySnap) {
     for (const row of snapshotRows) {
       if (row.lineKind !== "expense_category" || !row.expenseCategoryId) continue
+      const mappedDebtLineId = debtLineIdByLegacyCategoryId.get(row.expenseCategoryId)
       const amt = Number(row.plannedAmount)
       const c = row.currency.toUpperCase()
-      if (!expensePlannedByCategoryNative[row.expenseCategoryId])
-        expensePlannedByCategoryNative[row.expenseCategoryId] = {}
-      expensePlannedByCategoryNative[row.expenseCategoryId]![c] = amt
+      if (mappedDebtLineId) {
+        if (!expensePlannedByLineNative[mappedDebtLineId]) expensePlannedByLineNative[mappedDebtLineId] = {}
+        expensePlannedByLineNative[mappedDebtLineId]![c] =
+          (expensePlannedByLineNative[mappedDebtLineId]![c] ?? 0) + amt
+      } else if (visibleExpenseCategories.some((category) => category.id === row.expenseCategoryId)) {
+        if (!expensePlannedByCategoryNative[row.expenseCategoryId])
+          expensePlannedByCategoryNative[row.expenseCategoryId] = {}
+        expensePlannedByCategoryNative[row.expenseCategoryId]![c] = amt
+      }
     }
   } else if (isPastMonth && hasLegacyExpenseLineSnap) {
     const lineToCat = new Map(expLinesFull.map((l) => [l.id, l.categoryId]))
@@ -440,17 +495,26 @@ export async function getBudgetPageData(opts?: {
       if (!cid) continue
       const amt = Number(row.plannedAmount)
       const c = row.currency.toUpperCase()
-      if (!expensePlannedByCategoryNative[cid]) expensePlannedByCategoryNative[cid] = {}
-      expensePlannedByCategoryNative[cid]![c] = (expensePlannedByCategoryNative[cid]![c] ?? 0) + amt
+      if (debtLineIdSet.has(row.expenseLineId)) {
+        if (!expensePlannedByLineNative[row.expenseLineId]) expensePlannedByLineNative[row.expenseLineId] = {}
+        expensePlannedByLineNative[row.expenseLineId]![c] =
+          (expensePlannedByLineNative[row.expenseLineId]![c] ?? 0) + amt
+      } else if (visibleExpenseCategories.some((category) => category.id === cid)) {
+        if (!expensePlannedByCategoryNative[cid]) expensePlannedByCategoryNative[cid] = {}
+        expensePlannedByCategoryNative[cid]![c] =
+          (expensePlannedByCategoryNative[cid]![c] ?? 0) + amt
+      }
     }
   } else {
-    for (const cat of cats) {
+    for (const cat of visibleExpenseCategories) {
       const { currency, amount } = monthlyPlannedForExpenseCategory(cat)
       bumpNative(expensePlannedByCategoryNative, cat.id, currency, amount)
     }
+    for (const line of debtPaymentLines) {
+      const { currency, amount } = monthlyPlannedForLine(line, start, end)
+      bumpNative(expensePlannedByLineNative, line.id, currency, amount)
+    }
   }
-
-  const expensePlannedByLineNative: LineNativeMonthTotals = {}
 
   let incomeActual = sumIncomeRecordsInReportingCurrency({
     rows: monthIncomeRec,
@@ -462,13 +526,25 @@ export async function getBudgetPageData(opts?: {
     reportingCurrency: summaryCurrency,
     fx,
   })
+  const regularExpenseRecords = monthExpRec.filter((record) => !isDebtRecord(record))
+  const debtExpenseRecords = monthExpRec.filter((record) => isDebtRecord(record))
   let expenseActual = sumExpenseRecordsInReportingCurrency({
-    rows: monthExpRec,
+    rows: regularExpenseRecords,
     reportingCurrency: summaryCurrency,
     fx,
   })
   let expensePlanned = sumNativeLineMapInReportingCurrency({
     lineMap: expensePlannedByCategoryNative,
+    reportingCurrency: summaryCurrency,
+    fx,
+  })
+  let debtPaymentActual = sumExpenseRecordsInReportingCurrency({
+    rows: debtExpenseRecords,
+    reportingCurrency: summaryCurrency,
+    fx,
+  })
+  let debtPaymentPlanned = sumNativeLineMapInReportingCurrency({
+    lineMap: expensePlannedByLineNative,
     reportingCurrency: summaryCurrency,
     fx,
   })
@@ -479,7 +555,9 @@ export async function getBudgetPageData(opts?: {
     (!incomeActual.ok ||
       !incomePlanned.ok ||
       !expenseActual.ok ||
-      !expensePlanned.ok) &&
+      !expensePlanned.ok ||
+      !debtPaymentActual.ok ||
+      !debtPaymentPlanned.ok) &&
     fx
   ) {
     fxWarning = `Could not convert some flows to ${summaryCurrency} for the summary row.`
@@ -495,7 +573,7 @@ export async function getBudgetPageData(opts?: {
       fx: null,
     })
     expenseActual = sumExpenseRecordsInReportingCurrency({
-      rows: monthExpRec,
+      rows: regularExpenseRecords,
       reportingCurrency: summaryCurrency,
       fx: null,
     })
@@ -504,30 +582,24 @@ export async function getBudgetPageData(opts?: {
       reportingCurrency: summaryCurrency,
       fx: null,
     })
+    debtPaymentActual = sumExpenseRecordsInReportingCurrency({
+      rows: debtExpenseRecords,
+      reportingCurrency: summaryCurrency,
+      fx: null,
+    })
+    debtPaymentPlanned = sumNativeLineMapInReportingCurrency({
+      lineMap: expensePlannedByLineNative,
+      reportingCurrency: summaryCurrency,
+      fx: null,
+    })
   }
 
   const investableActual = Math.max(
     0,
-    (incomeActual.ok ? incomeActual.income : 0) - (expenseActual.ok ? expenseActual.expense : 0),
+    (incomeActual.ok ? incomeActual.income : 0) -
+      (expenseActual.ok ? expenseActual.expense : 0) -
+      (debtPaymentActual.ok ? debtPaymentActual.expense : 0),
   )
-
-  const debtCategoryIds = new Set(
-    cats.filter((c) => c.cashFlowType === "debt_payment").map((c) => c.id),
-  )
-  const regularCategoryIds = new Set(
-    cats.filter((c) => c.cashFlowType !== "debt_payment").map((c) => c.id),
-  )
-  const splitCategoryTotals = (
-    totalsByCategoryId: Record<string, number>,
-  ): { expense: number; debtPayment: number } => {
-    let expense = 0
-    let debtPayment = 0
-    for (const [categoryId, total] of Object.entries(totalsByCategoryId)) {
-      if (debtCategoryIds.has(categoryId)) debtPayment += total
-      else if (regularCategoryIds.has(categoryId)) expense += total
-    }
-    return { expense, debtPayment }
-  }
 
   const activeStrat = activeStratRows[0]
 
@@ -630,7 +702,8 @@ export async function getBudgetPageData(opts?: {
     return a.name.localeCompare(b.name)
   })
 
-  const expLinesForMonth = expLinesSorted
+  const expLinesForMonth = expLinesSorted.filter((line) => !line.linkedLiabilityId)
+  const debtLinesForMonth = expLinesSorted.filter((line) => !!line.linkedLiabilityId)
   const expenseLedgerByRecordId = new Map(
     monthTxRows
       .filter((t) => t.postedExpenseRecordId)
@@ -650,7 +723,7 @@ export async function getBudgetPageData(opts?: {
       isManual: boolean
     }[]
   > = {}
-  for (const r of monthExpRec) {
+  for (const r of regularExpenseRecords) {
     const tx = expenseLedgerByRecordId.get(r.id)
     const description =
       tx?.description ??
@@ -687,8 +760,15 @@ export async function getBudgetPageData(opts?: {
     fx: summaryFxForCategory,
   })
   const expenseActualByCategoryId = actualByCategoryResult.ok ? actualByCategoryResult.totalsById : {}
-  const plannedSplit = splitCategoryTotals(expensePlannedByCategoryId)
-  const actualSplit = splitCategoryTotals(expenseActualByCategoryId)
+  const strategyContext =
+    activeStrat && stratTargetRows.length > 0
+      ? {
+          strategyName: activeStrat.name,
+          targetCount: stratTargetRows.length,
+          weightSum: strategyAllocate.weightSum,
+          href: dashboardRoutes.netWorth,
+        }
+      : null
 
   return {
     ym,
@@ -700,10 +780,10 @@ export async function getBudgetPageData(opts?: {
     totals: {
       incomeActual: incomeActual.ok ? incomeActual.income : 0,
       incomePlanned: incomePlanned.ok ? incomePlanned.total : 0,
-      expenseActual: actualSplit.expense,
-      expensePlanned: plannedSplit.expense,
-      debtPaymentActual: actualSplit.debtPayment,
-      debtPaymentPlanned: plannedSplit.debtPayment,
+      expenseActual: expenseActual.ok ? expenseActual.expense : 0,
+      expensePlanned: expensePlanned.ok ? expensePlanned.total : 0,
+      debtPaymentActual: debtPaymentActual.ok ? debtPaymentActual.expense : 0,
+      debtPaymentPlanned: debtPaymentPlanned.ok ? debtPaymentPlanned.total : 0,
       investableActual,
     },
     summaryCurrency,
@@ -715,9 +795,10 @@ export async function getBudgetPageData(opts?: {
     expenseRecordsByLineId: groupExpenseRecordsByLineId(monthExpRec),
     incomeActualByLineNative,
     incomePlannedByLineNative,
-    expenseCategories: cats,
+    expenseCategories: visibleExpenseCategories,
     liabilityOptions,
     expenseLines: expLinesForMonth,
+    debtPaymentLines: debtLinesForMonth,
     expenseTransactionsByCategoryId,
     expenseActualByCategoryNative,
     expenseActualByLineNative,
@@ -726,5 +807,7 @@ export async function getBudgetPageData(opts?: {
     expenseActualByCategoryId,
     strategyAllocate,
     allocatePreview,
+    orphanedDebtCategories: [],
+    strategyContext,
   }
 }

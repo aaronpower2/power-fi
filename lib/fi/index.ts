@@ -1,5 +1,7 @@
 export type {
+  BlendedReturnAssetInput,
   ChartPoint,
+  CoastFiInput,
   EngineAllocationInput,
   EngineAssetInput,
   GrowthType,
@@ -7,6 +9,8 @@ export type {
   ProjectionResult,
 } from "./types"
 export {
+  calcBlendedReturn,
+  calcCoastFiNumber,
   fundingShortfall,
   isGoalFundable,
   monthCountInclusive,

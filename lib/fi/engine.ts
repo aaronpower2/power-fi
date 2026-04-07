@@ -1,5 +1,7 @@
 import type {
+  BlendedReturnAssetInput,
   ChartPoint,
+  CoastFiInput,
   EngineAssetInput,
   ProjectionInput,
   ProjectionResult,
@@ -16,6 +18,33 @@ export function requiredPrincipal(
 
 export function monthlyRateFromAnnual(annual: number): number {
   return (1 + annual) ** (1 / 12) - 1
+}
+
+export function calcBlendedReturn(assets: BlendedReturnAssetInput[]): number | null {
+  const included = assets.filter(
+    (asset) =>
+      asset.growthType === "compound" &&
+      asset.assumedAnnualReturn != null &&
+      asset.currentBalance > 0,
+  )
+  const totalBalance = included.reduce((sum, asset) => sum + asset.currentBalance, 0)
+  if (totalBalance <= 0) return null
+
+  return included.reduce(
+    (sum, asset) =>
+      sum + (asset.currentBalance / totalBalance) * (asset.assumedAnnualReturn ?? 0),
+    0,
+  )
+}
+
+export function calcCoastFiNumber(input: CoastFiInput): number | null {
+  const { requiredPrincipal, monthsToFiDate, blendedAnnualReturn } = input
+  if (!Number.isFinite(requiredPrincipal) || requiredPrincipal <= 0) return null
+  if (!Number.isFinite(monthsToFiDate) || monthsToFiDate <= 0) return null
+  if (!Number.isFinite(blendedAnnualReturn)) return null
+
+  const monthlyRate = monthlyRateFromAnnual(blendedAnnualReturn)
+  return requiredPrincipal / Math.pow(1 + monthlyRate, monthsToFiDate)
 }
 
 function startOfUtcMonth(d: Date): Date {

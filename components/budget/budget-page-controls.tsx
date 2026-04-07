@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { useMemo, useState, useSyncExternalStore } from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
@@ -18,7 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { AllocateInvestableCapitalCta } from "@/components/budget/allocate-investable-capital-cta"
-import { finalizeBudgetMonth } from "@/lib/actions/budget"
+import { finalizeBudgetMonth, postPlannedDebtPayments } from "@/lib/actions/budget"
 import type { getBudgetPageData } from "@/lib/data/budget"
 import { addMonthsToYm, formatYearMonthYm, parseYearMonthYm } from "@/lib/dates"
 import { dashboardRoutes } from "@/lib/routes"
@@ -261,6 +262,7 @@ export function BudgetPageControls({ data }: { data: BudgetData }) {
   const router = useRouter()
   const refresh = () => router.refresh()
   const [finalizing, setFinalizing] = useState(false)
+  const [postingDebt, setPostingDebt] = useState(false)
 
   function budgetQuery(nextYm: string) {
     const p = new URLSearchParams()
@@ -277,46 +279,104 @@ export function BudgetPageControls({ data }: { data: BudgetData }) {
   return (
     <div className="flex w-full flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
       <BudgetMonthSelector data={data} budgetQuery={budgetQuery} goMonth={goMonth} />
-      <div className="flex flex-wrap items-center gap-3 sm:justify-end">
-        <BudgetSummaryCurrencySwitch data={data} />
-        <AllocateInvestableCapitalCta data={data} refresh={refresh} />
-        {data.isPastMonth ? (
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              className="gap-1.5"
-              disabled={finalizing}
-              onClick={async () => {
-                setFinalizing(true)
-                const r = await finalizeBudgetMonth(data.ym)
-                setFinalizing(false)
-                if (r.ok) {
+      <div className="flex flex-col items-start gap-2 sm:items-end">
+        <div className="flex flex-wrap items-center gap-3 sm:justify-end">
+          <BudgetSummaryCurrencySwitch data={data} />
+          <AllocateInvestableCapitalCta data={data} refresh={refresh} />
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={postingDebt || data.debtPaymentLines.length === 0}
+            onClick={async () => {
+              setPostingDebt(true)
+              const r = await postPlannedDebtPayments({ yearMonth: data.ym })
+              setPostingDebt(false)
+              if (r.ok) {
+                const created = r.data?.createdCount ?? 0
+                const skipped = r.data?.skippedCount ?? 0
+                if (created > 0) {
                   toast.success(
-                    data.planUsesSnapshot
-                      ? "Closed month updated with current line rules."
-                      : "Month closed — planned amounts saved for this month.",
+                    created === 1
+                      ? "Debt payment posted."
+                      : `${created} planned debt payments posted.`,
                   )
                   refresh()
-                } else toast.error(r.error)
-              }}
-            >
-              <Lock className="size-4 shrink-0" aria-hidden />
-              {finalizing
-                ? data.planUsesSnapshot
-                  ? "Updating…"
-                  : "Closing…"
-                : data.planUsesSnapshot
-                  ? "Re-close month"
-                  : "Close month"}
-            </Button>
-            <InfoTooltip>
-              Freezes planned amounts for every income line and every expense category for this UTC month using
-              your current recurring rules. Past months then keep that plan even if you edit categories or lines
-              later. You can re-close to refresh the snapshot from today&apos;s definitions.
-            </InfoTooltip>
-          </div>
-        ) : null}
+                } else if (skipped > 0) {
+                  toast.message(
+                    "Nothing posted. Debt lines already have records or no planned amount for this month.",
+                  )
+                } else {
+                  toast.message("No planned debt payments to post for this month.")
+                }
+              } else toast.error(r.error)
+            }}
+          >
+            {postingDebt ? "Posting debt…" : "Post debt payments"}
+          </Button>
+          {data.isPastMonth ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                className="gap-1.5"
+                disabled={finalizing}
+                onClick={async () => {
+                  setFinalizing(true)
+                  const r = await finalizeBudgetMonth(data.ym)
+                  setFinalizing(false)
+                  if (r.ok) {
+                    toast.success(
+                      data.planUsesSnapshot
+                        ? "Closed month updated with current line rules."
+                        : "Month closed — planned amounts saved for this month.",
+                    )
+                    refresh()
+                  } else toast.error(r.error)
+                }}
+              >
+                <Lock className="size-4 shrink-0" aria-hidden />
+                {finalizing
+                  ? data.planUsesSnapshot
+                    ? "Updating…"
+                    : "Closing…"
+                  : data.planUsesSnapshot
+                    ? "Re-close month"
+                    : "Close month"}
+              </Button>
+              <InfoTooltip>
+                Freezes planned amounts for every income line, every expense category, and every debt
+                payment line for this UTC month using your current recurring rules. Past months then keep
+                that plan even if you edit categories or lines later. You can re-close to refresh the
+                snapshot from today&apos;s definitions.
+              </InfoTooltip>
+            </div>
+          ) : null}
+        </div>
+        <div className="text-muted-foreground text-sm">
+          {data.strategyContext ? (
+            <>
+              Strategy: &quot;{data.strategyContext.strategyName}&quot; · {data.strategyContext.targetCount} assets
+              ·{" "}
+              <Link
+                href={data.strategyContext.href}
+                className="text-primary underline-offset-4 hover:underline"
+              >
+                Edit in Net Worth
+              </Link>
+            </>
+          ) : (
+            <>
+              No active allocation strategy.{" "}
+              <Link
+                href={dashboardRoutes.netWorth}
+                className="text-primary underline-offset-4 hover:underline"
+              >
+                Set up in Net Worth
+              </Link>
+            </>
+          )}
+        </div>
       </div>
     </div>
   )

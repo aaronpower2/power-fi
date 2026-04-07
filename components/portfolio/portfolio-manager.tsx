@@ -1,6 +1,7 @@
 "use client"
 
 import { zodResolver } from "@hookform/resolvers/zod"
+import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { Fragment, useEffect, useId, useMemo, useState } from "react"
 import {
@@ -137,6 +138,11 @@ type CreateLiabilityForm = z.input<typeof createLiabilitySchema>
 type UpdateLiabilityInput = z.input<typeof updateLiabilitySchema>
 
 type SecuredRow = PortfolioPayload["securedLiabilityByAssetId"][string]
+type PendingDeleteState = {
+  id: string
+  requiresConfirmation: boolean
+  message?: string
+}
 
 const ASSET_TABLE_CATEGORY_ORDER: AssetCategory[] = [
   "investment",
@@ -203,6 +209,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
     portfolioFxWarning,
     fxAsOfDate,
     securedLiabilityByAssetId,
+    allocationHealthSummary,
   } = data
 
   const assetsGrouped = useMemo(() => {
@@ -227,7 +234,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
   )
 
   const [mainTab, setMainTab] = useState("assets")
-  const [pendingDeleteAsset, setPendingDeleteAsset] = useState<string | null>(null)
+  const [pendingDeleteAsset, setPendingDeleteAsset] = useState<PendingDeleteState | null>(null)
   const [pendingDeleteStrategy, setPendingDeleteStrategy] = useState<string | null>(null)
   const [assetToEdit, setAssetToEdit] = useState<AssetRow | null>(null)
   const [assetForRecords, setAssetForRecords] = useState<AssetRow | null>(null)
@@ -236,7 +243,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
     name: string
   } | null>(null)
   const [liabilityToEdit, setLiabilityToEdit] = useState<LiabilityRow | null>(null)
-  const [pendingDeleteLiability, setPendingDeleteLiability] = useState<string | null>(null)
+  const [pendingDeleteLiability, setPendingDeleteLiability] = useState<PendingDeleteState | null>(null)
 
   const reportingCcy = goalReportingCurrency ?? summaryCurrency
   const tabBaseId = useId()
@@ -510,6 +517,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                       </TableRow>
                       {items.map((a) => {
                         const recs = allocationRecordsByAssetId[a.id] ?? []
+                        const recentRecs = recs.slice(0, 3)
                         const allocated = recs.reduce((s, r) => s + Number(r.amount), 0)
                         const link = parseAssetMeta(a.meta).linkToManage
                         return (
@@ -540,6 +548,16 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                               {link?.label && !link.url ? (
                                 <div className="text-muted-foreground mt-0.5 max-w-[16rem] truncate text-[11px]">
                                   {link.label}
+                                </div>
+                              ) : null}
+                              {recentRecs.length > 0 ? (
+                                <div className="text-muted-foreground mt-1 space-y-0.5 text-[11px]">
+                                  {recentRecs.map((record) => (
+                                    <div key={record.id}>
+                                      {record.allocatedOn} ·{" "}
+                                      {formatCurrency(Number(record.amount), a.currency ?? "USD")}
+                                    </div>
+                                  ))}
                                 </div>
                               ) : null}
                             </TableCell>
@@ -601,7 +619,10 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                                     variant="destructive"
                                     onSelect={(e) => {
                                       e.preventDefault()
-                                      setPendingDeleteAsset(a.id)
+                                      setPendingDeleteAsset({
+                                        id: a.id,
+                                        requiresConfirmation: false,
+                                      })
                                     }}
                                   >
                                     <Trash2 className="size-4 opacity-70" />
@@ -647,7 +668,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
           <CardHeader>
             <CardHeaderTitleRow
               title={<CardTitle>Liabilities</CardTitle>}
-              info="Track what you still owe. Loans tied to an asset are usually edited from that asset’s dialog. Fixed-installment rows can decline via linked debt-payment categories in Cash Flow; revolving balances stay manual unless you update them here."
+              info="Track what you still owe. Loans tied to an asset are usually edited from that asset’s dialog. Fixed-installment rows can decline via linked debt payment lines in Cash Flow; revolving balances stay manual unless you update them here."
             />
           </CardHeader>
           <CardContent>
@@ -672,7 +693,23 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                 ) : (
                   liabilities.map((row) => (
                     <TableRow key={row.id}>
-                      <TableCell className="font-medium">{row.name}</TableCell>
+                      <TableCell className="font-medium">
+                        <div>{row.name}</div>
+                        <div className="mt-1">
+                          <span
+                            className={cn(
+                              "inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium",
+                              row.hasDebtPaymentLine
+                                ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                                : "bg-amber-500/10 text-amber-700 dark:text-amber-400",
+                            )}
+                          >
+                            {row.hasDebtPaymentLine
+                              ? "Debt line tracked in Cash Flow"
+                              : "No debt payment line"}
+                          </span>
+                        </div>
+                      </TableCell>
                       <TableCell className="text-muted-foreground text-sm">
                         {row.liabilityType ?? "—"}
                       </TableCell>
@@ -704,7 +741,10 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                               variant="destructive"
                               onSelect={(e) => {
                                 e.preventDefault()
-                                setPendingDeleteLiability(row.id)
+                                setPendingDeleteLiability({
+                                  id: row.id,
+                                  requiresConfirmation: false,
+                                })
                               }}
                             >
                               <Trash2 className="size-4 opacity-70" />
@@ -742,6 +782,46 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
             refresh()
           }}
         />
+        <Card>
+          <CardHeader>
+            <CardHeaderTitleRow
+              title={<CardTitle>Allocation setup</CardTitle>}
+              info="Shows whether the active strategy is ready for Cash Flow allocation and when capital was last allocated."
+            />
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="space-y-1">
+              <p className="font-medium">
+                {allocationHealthSummary.strategyName
+                  ? `Active strategy: ${allocationHealthSummary.strategyName}`
+                  : "No active strategy"}
+              </p>
+              <p className="text-muted-foreground text-sm">
+                {allocationHealthSummary.strategyName
+                  ? `${allocationHealthSummary.targetCount} target${allocationHealthSummary.targetCount === 1 ? "" : "s"} · weights ${allocationHealthSummary.weightSum.toFixed(1)}%`
+                  : "Set up a strategy here before allocating in Cash Flow."}
+              </p>
+              <p className="text-muted-foreground text-sm">
+                {allocationHealthSummary.lastAllocatedOn
+                  ? `Last allocated: ${allocationHealthSummary.lastAllocatedOn}`
+                  : "No allocation history yet."}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <Link
+                href={dashboardRoutes.cashFlow}
+                className="text-primary font-medium underline-offset-4 hover:underline"
+              >
+                Allocate in Cash Flow
+              </Link>
+              {allocationHealthSummary.strategyName && targetSum !== 100 ? (
+                <span className="text-amber-700 dark:text-amber-400">
+                  Weights do not sum to 100%; allocation will be rescaled.
+                </span>
+              ) : null}
+            </div>
+          </CardContent>
+        </Card>
         <Card>
           <CardHeader>
             <CardHeaderTitleRow
@@ -911,7 +991,9 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete asset?</AlertDialogTitle>
             <AlertDialogDescription>
-              Removes the asset and related allocation targets. This cannot be undone.
+              {pendingDeleteAsset?.requiresConfirmation
+                ? pendingDeleteAsset.message
+                : "Removes the asset and related allocation targets. This cannot be undone."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -920,7 +1002,19 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={async () => {
                 if (!pendingDeleteAsset) return
-                const r = await deleteAsset(pendingDeleteAsset)
+                const r = await deleteAsset(
+                  pendingDeleteAsset.requiresConfirmation
+                    ? { id: pendingDeleteAsset.id, force: true }
+                    : pendingDeleteAsset.id,
+                )
+                if (r.ok && r.data?.requiresConfirmation) {
+                  setPendingDeleteAsset({
+                    id: pendingDeleteAsset.id,
+                    requiresConfirmation: true,
+                    message: r.data.message,
+                  })
+                  return
+                }
                 setPendingDeleteAsset(null)
                 if (r.ok) {
                   toast.success("Asset deleted")
@@ -977,7 +1071,9 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete liability?</AlertDialogTitle>
             <AlertDialogDescription>
-              Removes this liability row. Securing links are cleared. This cannot be undone.
+              {pendingDeleteLiability?.requiresConfirmation
+                ? pendingDeleteLiability.message
+                : "Removes this liability row. Securing links are cleared. This cannot be undone."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -986,7 +1082,19 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={async () => {
                 if (!pendingDeleteLiability) return
-                const r = await deleteLiability(pendingDeleteLiability)
+                const r = await deleteLiability(
+                  pendingDeleteLiability.requiresConfirmation
+                    ? { id: pendingDeleteLiability.id, force: true }
+                    : pendingDeleteLiability.id,
+                )
+                if (r.ok && r.data?.requiresConfirmation) {
+                  setPendingDeleteLiability({
+                    id: pendingDeleteLiability.id,
+                    requiresConfirmation: true,
+                    message: r.data.message,
+                  })
+                  return
+                }
                 setPendingDeleteLiability(null)
                 if (r.ok) {
                   toast.success("Liability deleted")
@@ -1075,15 +1183,18 @@ function liabilityToFormValues(row: LiabilityRow): UpdateLiabilityInput {
     trackingMode: (row.trackingMode ?? "fixed_installment") as UpdateLiabilityInput["trackingMode"],
     currentBalance: Number(row.currentBalance),
     securedByAssetId: row.securedByAssetId ?? "",
+    autoCreateBudgetCategory: false,
   }
 }
 
 function LiabilityFormFields({
   control,
   assets,
+  showAutoCreateBudgetCategory = false,
 }: {
   control: Control<FieldValues>
   assets: AssetRow[]
+  showAutoCreateBudgetCategory?: boolean
 }) {
   return (
     <>
@@ -1202,6 +1313,30 @@ function LiabilityFormFields({
           </FormItem>
         )}
       />
+      {showAutoCreateBudgetCategory ? (
+        <FormField
+          control={control}
+          name="autoCreateBudgetCategory"
+          render={({ field }) => (
+            <FormItem className="flex flex-row items-start gap-2 space-y-0">
+              <FormControl>
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={!!field.value}
+                  onChange={(e) => field.onChange(e.target.checked)}
+                />
+              </FormControl>
+              <div className="space-y-1">
+                <FormLabel className="font-normal">Create debt payment line</FormLabel>
+                <p className="text-muted-foreground text-xs">
+                  Creates a linked debt payment line in Cash Flow using this liability name.
+                </p>
+              </div>
+            </FormItem>
+          )}
+        />
+      ) : null}
     </>
   )
 }
@@ -1223,6 +1358,7 @@ function AddLiabilityDialog({
       trackingMode: "fixed_installment",
       currentBalance: 0,
       securedByAssetId: "",
+      autoCreateBudgetCategory: false,
     },
   })
 
@@ -1238,6 +1374,7 @@ function AddLiabilityDialog({
         trackingMode: "fixed_installment",
         currentBalance: 0,
         securedByAssetId: "",
+        autoCreateBudgetCategory: false,
       })
       onSaved()
     } else toast.error(r.error)
@@ -1263,6 +1400,7 @@ function AddLiabilityDialog({
             <LiabilityFormFields
               control={form.control as unknown as Control<FieldValues>}
               assets={assets}
+              showAutoCreateBudgetCategory
             />
           </form>
         </Form>
@@ -1360,6 +1498,7 @@ function assetToFormValues(asset: AssetRow, secured: SecuredRow | undefined): Up
           currency: secured.currency as UpdateAssetInput["currency"],
           trackingMode: secured.trackingMode as "fixed_installment" | "revolving",
           currentBalance: Number(secured.currentBalance),
+          autoCreateBudgetCategory: false,
         }
       : undefined,
   }
@@ -1561,6 +1700,7 @@ function AddAssetDialog({ onSaved }: { onSaved: () => void }) {
         currency: ccy as CreateAssetForm["currency"],
         trackingMode: "fixed_installment",
         currentBalance: 0,
+        autoCreateBudgetCategory: false,
       })
     } else {
       form.setValue("securedLiability", undefined)
@@ -1668,6 +1808,7 @@ function EditAssetDialog({
           currency: ccy as UpdateAssetInput["currency"],
           trackingMode: "fixed_installment",
           currentBalance: 0,
+          autoCreateBudgetCategory: false,
         })
       }
     } else {
@@ -2033,6 +2174,30 @@ function AssetFormFields({
                 </FormItem>
               )}
             />
+            {variant === "create" ? (
+              <FormField
+                control={control}
+                name="securedLiability.autoCreateBudgetCategory"
+                render={({ field }) => (
+                  <FormItem className="flex flex-row items-start gap-2 space-y-0">
+                    <FormControl>
+                      <input
+                        type="checkbox"
+                        className="mt-1"
+                        checked={!!field.value}
+                        onChange={(e) => field.onChange(e.target.checked)}
+                      />
+                    </FormControl>
+                    <div className="space-y-1">
+                      <FormLabel className="font-normal">Create debt payment line</FormLabel>
+                      <p className="text-muted-foreground text-xs">
+                        Creates a linked debt payment line in Cash Flow for this loan.
+                      </p>
+                    </div>
+                  </FormItem>
+                )}
+              />
+            ) : null}
           </div>
         ) : null}
       </div>

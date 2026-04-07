@@ -4,6 +4,7 @@ import assert from "node:assert/strict"
 import {
   coalesceSupportedCurrency,
   defaultExpenseCategoryRecordCurrency,
+  defaultExpenseLineRecordCurrency,
   defaultIncomeLineRecordCurrency,
 } from "./cashflow-input-currency"
 
@@ -51,4 +52,18 @@ test("defaultIncomeLineRecordCurrency uses line recurring currency", () => {
     defaultIncomeLineRecordCurrency({ recurringCurrency: "NZD" }, "USD"),
     "NZD",
   )
+})
+
+test("defaultExpenseLineRecordCurrency uses linked liability currency", () => {
+  const map = new Map([["li-1", "GBP"]])
+  const ccy = defaultExpenseLineRecordCurrency({
+    line: {
+      linkedLiabilityId: "li-1",
+      isRecurring: true,
+      recurringCurrency: "USD",
+    },
+    liabilityCurrencyById: map,
+    fallbackCurrency: "AED",
+  })
+  assert.equal(ccy, "GBP")
 })

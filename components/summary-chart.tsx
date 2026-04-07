@@ -16,11 +16,12 @@ import { formatCurrency } from "@/lib/format"
 
 type Props = {
   series: ChartPoint[]
+  coastFiNumber?: number | null
   requiredPrincipal: number
   currencyCode: string
 }
 
-export function SummaryChart({ series, requiredPrincipal, currencyCode }: Props) {
+export function SummaryChart({ series, coastFiNumber, requiredPrincipal, currencyCode }: Props) {
   const data = series.map((p) => ({
     label: p.label,
     projected: p.projectedTotal,
@@ -62,6 +63,19 @@ export function SummaryChart({ series, requiredPrincipal, currencyCode }: Props)
             ]}
             labelFormatter={(label) => label}
           />
+          {coastFiNumber != null && coastFiNumber > 0 ? (
+            <ReferenceLine
+              y={coastFiNumber}
+              stroke="var(--color-chart-3)"
+              strokeDasharray="4 4"
+              label={{
+                value: "Coast FI",
+                position: "insideTopRight",
+                fill: "var(--muted-foreground)",
+                fontSize: 11,
+              }}
+            />
+          ) : null}
           {requiredPrincipal > 0 ? (
             <ReferenceLine
               y={requiredPrincipal}

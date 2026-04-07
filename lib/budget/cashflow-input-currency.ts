@@ -18,6 +18,12 @@ export type ExpenseCategoryForInputCurrency = {
   recurringCurrency: string | null
 }
 
+export type ExpenseLineForInputCurrency = {
+  linkedLiabilityId: string | null
+  isRecurring: boolean
+  recurringCurrency: string | null
+}
+
 /**
  * Currency for posting expense/debt line records: liability denomination for debt categories,
  * else category recurring budget currency when set; otherwise `fallbackCurrency` (typically
@@ -36,6 +42,23 @@ export function defaultExpenseCategoryRecordCurrency(args: {
   }
   if (category.isRecurring) {
     return coalesceSupportedCurrency(category.recurringCurrency, fallbackCurrency)
+  }
+  return fallbackCurrency
+}
+
+export function defaultExpenseLineRecordCurrency(args: {
+  line: ExpenseLineForInputCurrency | undefined
+  liabilityCurrencyById: ReadonlyMap<string, string>
+  fallbackCurrency: SupportedCurrency
+}): SupportedCurrency {
+  const { line, liabilityCurrencyById, fallbackCurrency } = args
+  if (!line) return fallbackCurrency
+  if (line.linkedLiabilityId) {
+    const ccy = liabilityCurrencyById.get(line.linkedLiabilityId)
+    return coalesceSupportedCurrency(ccy, fallbackCurrency)
+  }
+  if (line.isRecurring) {
+    return coalesceSupportedCurrency(line.recurringCurrency, fallbackCurrency)
   }
   return fallbackCurrency
 }

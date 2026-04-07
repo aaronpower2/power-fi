@@ -183,15 +183,106 @@ export const updateExpenseCategorySchema = updateExpenseCategoryInput.transform(
 }))
 
 const expenseLineFields = z.object({
-  categoryId: z.string().uuid(),
+  categoryId: z
+    .union([z.string().uuid(), z.literal(""), z.null()])
+    .optional()
+    .transform((v) => (v === "" || v == null ? undefined : v)),
   name: z.string().min(1).max(256),
+  linkedLiabilityId: z
+    .union([z.string().uuid(), z.literal(""), z.null()])
+    .optional()
+    .transform((v) => (v === "" || v == null ? undefined : v)),
+  isRecurring: z.boolean().default(false),
+  frequency: budgetRecurringFrequencySchema.optional().nullable(),
+  recurringAmount: z.coerce.number().optional().nullable(),
+  recurringCurrency: supportedCurrencySchema.optional().nullable(),
+  recurringAnchorDate: dateStr.optional().nullable(),
 })
 
-export const expenseLineSchema = expenseLineFields
-
-export const updateExpenseLineSchema = expenseLineFields.extend({
-  id: z.string().uuid(),
+const expenseLineRefined = expenseLineFields.superRefine((data, ctx) => {
+  if (!data.linkedLiabilityId && !data.categoryId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Choose a category for the line",
+      path: ["categoryId"],
+    })
+  }
+  if (data.linkedLiabilityId && !data.isRecurring) {
+    return
+  }
+  if (data.isRecurring) {
+    if (data.frequency == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Choose a frequency for recurring line items",
+        path: ["frequency"],
+      })
+    }
+    const amt = data.recurringAmount
+    if (amt == null || Number.isNaN(amt) || amt <= 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Enter amount per period",
+        path: ["recurringAmount"],
+      })
+    }
+  }
 })
+
+export const expenseLineSchema = expenseLineRefined.transform((data) => ({
+  categoryId: data.categoryId ?? null,
+  name: data.name,
+  linkedLiabilityId: data.linkedLiabilityId ?? null,
+  isRecurring: data.isRecurring,
+  frequency: data.isRecurring ? data.frequency! : null,
+  recurringAmount: data.isRecurring ? data.recurringAmount! : null,
+  recurringCurrency: data.isRecurring ? (data.recurringCurrency ?? "AED") : null,
+  recurringAnchorDate: data.isRecurring ? (data.recurringAnchorDate ?? null) : null,
+}))
+
+export const updateExpenseLineSchema = z
+  .object({ id: z.string().uuid() })
+  .merge(expenseLineFields)
+  .superRefine((data, ctx) => {
+    if (!data.linkedLiabilityId && !data.categoryId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Choose a category for the line",
+        path: ["categoryId"],
+      })
+    }
+    if (data.linkedLiabilityId && !data.isRecurring) {
+      return
+    }
+    if (data.isRecurring) {
+      if (data.frequency == null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Choose a frequency for recurring line items",
+          path: ["frequency"],
+        })
+      }
+      const amt = data.recurringAmount
+      if (amt == null || Number.isNaN(amt) || amt <= 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Enter amount per period",
+          path: ["recurringAmount"],
+        })
+      }
+    }
+  })
+  .transform((data) => ({
+    id: data.id,
+    categoryId: data.categoryId ?? null,
+    name: data.name,
+    linkedLiabilityId: data.linkedLiabilityId ?? null,
+    isRecurring: data.isRecurring,
+    frequency: data.isRecurring ? data.frequency! : null,
+    recurringAmount: data.isRecurring ? data.recurringAmount! : null,
+    recurringCurrency: data.isRecurring ? (data.recurringCurrency ?? "AED") : null,
+    recurringAnchorDate: data.isRecurring ? (data.recurringAnchorDate ?? null) : null,
+  }))
 
 export const expenseRecordSchema = z.object({
   expenseCategoryId: z.string().uuid(),
