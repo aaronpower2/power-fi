@@ -935,9 +935,12 @@ function CreateGoalDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
-          <div className="flex min-w-0 flex-1 items-center gap-1.5 pr-8">
+      <DialogContent
+        fullViewport
+        className="inset-4 max-h-[calc(100dvh-2rem)] sm:inset-6 sm:max-h-[calc(100dvh-3rem)]"
+      >
+        <DialogHeader className="border-border flex shrink-0 flex-row flex-wrap items-center justify-between gap-2 space-y-0 border-b px-6 py-4 pr-14">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
             <DialogTitle>Create goal</DialogTitle>
             <InfoTooltip>
               Set FI date, withdrawal rate, and lifestyle lines that sum to your monthly funding target.
@@ -947,89 +950,91 @@ function CreateGoalDialog({
             Create
           </Button>
         </DialogHeader>
-        <Form {...form}>
-          <form id="goal-create-form" onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-            <FormField
-              control={form.control}
-              name="name"
-              render={({ field }) => (
-                <FormItem>
-                  <div className="flex items-center gap-1">
-                    <FormLabel>Goal name</FormLabel>
-                    <InfoTooltip>How this goal appears in FI summary and lists.</InfoTooltip>
-                  </div>
-                  <FormControl>
-                    <Input placeholder="e.g. Baseline plan" autoComplete="off" {...field} />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name="currency"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Goal currency</FormLabel>
-                  <Select onValueChange={field.onChange} value={field.value}>
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+          <Form {...form}>
+            <form id="goal-create-form" onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+              <FormField
+                control={form.control}
+                name="name"
+                render={({ field }) => (
+                  <FormItem>
+                    <div className="flex items-center gap-1">
+                      <FormLabel>Goal name</FormLabel>
+                      <InfoTooltip>How this goal appears in FI summary and lists.</InfoTooltip>
+                    </div>
                     <FormControl>
-                      <SelectTrigger>
-                        <SelectValue placeholder="Currency" />
-                      </SelectTrigger>
+                      <Input placeholder="e.g. Baseline plan" autoComplete="off" {...field} />
                     </FormControl>
-                    <SelectContent>
-                      {SUPPORTED_CURRENCIES.map((c) => (
-                        <SelectItem key={c} value={c}>
-                          {c}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name="fiDate"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>FI date</FormLabel>
-                  <FormControl>
-                    <Input type="date" {...field} />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name="withdrawalRatePercent"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Withdrawal rate (%)</FormLabel>
-                  <FormControl>
-                    <Input type="number" step="0.01" min={0.1} max={50} {...field} />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <LifestyleLinesFields
-              control={form.control as unknown as Control<GoalLifestyleFormValues>}
-              currencyCode={createCurrency}
-              budgetCategoriesForLifestyleCopy={budgetCategoriesForLifestyleCopy}
-            />
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={makeActive}
-                onChange={(e) => setMakeActive(e.target.checked)}
+                    <FormMessage />
+                  </FormItem>
+                )}
               />
-              Set as active goal (deactivates others)
-            </label>
-          </form>
-        </Form>
+              <FormField
+                control={form.control}
+                name="currency"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Goal currency</FormLabel>
+                    <Select onValueChange={field.onChange} value={field.value}>
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Currency" />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        {SUPPORTED_CURRENCIES.map((c) => (
+                          <SelectItem key={c} value={c}>
+                            {c}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="fiDate"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>FI date</FormLabel>
+                    <FormControl>
+                      <Input type="date" {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="withdrawalRatePercent"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Withdrawal rate (%)</FormLabel>
+                    <FormControl>
+                      <Input type="number" step="0.01" min={0.1} max={50} {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <LifestyleLinesFields
+                control={form.control as unknown as Control<GoalLifestyleFormValues>}
+                currencyCode={createCurrency}
+                budgetCategoriesForLifestyleCopy={budgetCategoriesForLifestyleCopy}
+              />
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={makeActive}
+                  onChange={(e) => setMakeActive(e.target.checked)}
+                />
+                Set as active goal (deactivates others)
+              </label>
+            </form>
+          </Form>
+        </div>
       </DialogContent>
     </Dialog>
   )
