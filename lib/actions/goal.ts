@@ -29,6 +29,8 @@ export async function createGoal(
   }
   const v = parsed.data
   const withdrawalRate = (v.withdrawalRatePercent / 100).toFixed(6)
+  const targetSavingsRate =
+    v.targetSavingsRatePercent != null ? (v.targetSavingsRatePercent / 100).toFixed(4) : null
   const total = sumLifestyleMonthly(v.lifestyleLines)
 
   if (v.makeActive) {
@@ -42,6 +44,7 @@ export async function createGoal(
         name: v.name,
         fiDate: v.fiDate,
         withdrawalRate,
+        targetSavingsRate,
         monthlyFundingRequirement: total.toFixed(2),
         currency: v.currency,
         isActive: v.makeActive,
@@ -75,6 +78,8 @@ export async function updateGoal(input: unknown): Promise<ActionResult> {
   }
   const v = parsed.data
   const withdrawalRate = (v.withdrawalRatePercent / 100).toFixed(6)
+  const targetSavingsRate =
+    v.targetSavingsRatePercent != null ? (v.targetSavingsRatePercent / 100).toFixed(4) : null
   const total = sumLifestyleMonthly(v.lifestyleLines)
 
   await db.transaction(async (tx) => {
@@ -95,6 +100,7 @@ export async function updateGoal(input: unknown): Promise<ActionResult> {
         name: v.name,
         fiDate: v.fiDate,
         withdrawalRate,
+        targetSavingsRate,
         monthlyFundingRequirement: total.toFixed(2),
         currency: v.currency,
         updatedAt: new Date(),

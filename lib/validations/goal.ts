@@ -7,6 +7,11 @@ const dateStr = z
   .min(10)
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD")
 
+const optionalPercentInput = z.preprocess(
+  (value) => (value === "" || value == null ? null : value),
+  z.coerce.number().min(0, "At least 0%").max(100, "At most 100%").nullable(),
+)
+
 export const lifestyleLineInputSchema = z.object({
   name: z.string().trim().min(1, "Line name required").max(256),
   monthlyAmount: z.coerce.number().positive("Monthly cost must be positive"),
@@ -20,6 +25,7 @@ export const goalInputSchema = z.object({
     .number()
     .min(0.1, "At least 0.1%")
     .max(50, "At most 50%"),
+  targetSavingsRatePercent: optionalPercentInput,
   lifestyleLines: z
     .array(lifestyleLineInputSchema)
     .min(1, "Add at least one lifestyle line"),
@@ -38,6 +44,6 @@ export function sumLifestyleMonthly(lines: { monthlyAmount: number }[]): number 
 }
 
 export type LifestyleLineInput = z.infer<typeof lifestyleLineInputSchema>
-export type GoalInput = z.infer<typeof goalInputSchema>
-export type CreateGoalInput = z.infer<typeof createGoalSchema>
-export type UpdateGoalInput = z.infer<typeof updateGoalSchema>
+export type GoalInput = z.input<typeof goalInputSchema>
+export type CreateGoalInput = z.input<typeof createGoalSchema>
+export type UpdateGoalInput = z.input<typeof updateGoalSchema>

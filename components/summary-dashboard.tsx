@@ -11,6 +11,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton"
 import { CardHeaderTitleRow, InfoTooltip } from "@/components/info-tooltip"
 import { SummaryChart } from "@/components/summary-chart"
+import { SavingsRateCard } from "@/components/summary/savings-rate-card"
 import { Progress } from "@/components/ui/progress"
 import type { getSummaryData } from "@/lib/data/summary"
 import {
@@ -56,7 +57,7 @@ export function SummaryDashboard({ data }: { data: SummaryData }) {
       <div
         className={cn(
           "grid gap-4 sm:grid-cols-2",
-          data.coastFiNumber != null ? "xl:grid-cols-6" : "xl:grid-cols-5",
+          data.coastFiNumber != null ? "xl:grid-cols-7" : "xl:grid-cols-6",
         )}
       >
         <MetricCard
@@ -99,6 +100,13 @@ export function SummaryDashboard({ data }: { data: SummaryData }) {
                 })}`
               : undefined
           }
+        />
+        <SavingsRateCard
+          currentRate={data.savingsRateCurrent}
+          rollingAvg={data.savingsRateRolling3Month}
+          targetRate={data.savingsRateTarget}
+          targetIsDefault={data.savingsRateTargetIsDefault}
+          currentMonth={data.savingsRateCurrentLabel}
         />
         {data.coastFiNumber != null ? (
           <CoastFiCard

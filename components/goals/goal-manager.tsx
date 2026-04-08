@@ -733,6 +733,8 @@ function GoalEditForm({
       currency: (goal.currency ?? "USD") as UpdateGoalInput["currency"],
       fiDate: goal.fiDate,
       withdrawalRatePercent: Number(goal.withdrawalRate) * 100,
+      targetSavingsRatePercent:
+        goal.targetSavingsRate != null ? Number(goal.targetSavingsRate) * 100 : null,
       lifestyleLines: defaultLifestyleLines(goal, lifestyleLines),
     },
   })
@@ -821,6 +823,33 @@ function GoalEditForm({
                 </FormItem>
               )}
             />
+            <FormField
+              control={form.control}
+              name="targetSavingsRatePercent"
+              render={({ field }) => (
+                <FormItem>
+                  <div className="flex items-center gap-1">
+                    <FormLabel>Target savings rate (%)</FormLabel>
+                    <InfoTooltip>
+                      Optional benchmark for the Summary dashboard savings-rate card. Leave blank to
+                      use the default 40%.
+                    </InfoTooltip>
+                  </div>
+                  <FormControl>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      min={0}
+                      max={100}
+                      placeholder="40"
+                      {...field}
+                      value={typeof field.value === "number" || typeof field.value === "string" ? field.value : ""}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
         <LifestyleLinesFields
           control={form.control as unknown as Control<GoalLifestyleFormValues>}
           currencyCode={goalCurrency}
@@ -899,6 +928,7 @@ function CreateGoalDialog({
       currency: "USD",
       fiDate: "",
       withdrawalRatePercent: 4,
+      targetSavingsRatePercent: null,
       lifestyleLines: [
         { name: "Core living", monthlyAmount: 3000 },
         { name: "Discretionary", monthlyAmount: 2000 },
@@ -923,6 +953,7 @@ function CreateGoalDialog({
         currency: "USD",
         fiDate: "",
         withdrawalRatePercent: 4,
+        targetSavingsRatePercent: null,
         lifestyleLines: [
           { name: "Core living", monthlyAmount: 3000 },
           { name: "Discretionary", monthlyAmount: 2000 },
@@ -1014,6 +1045,33 @@ function CreateGoalDialog({
                     <FormLabel>Withdrawal rate (%)</FormLabel>
                     <FormControl>
                       <Input type="number" step="0.01" min={0.1} max={50} {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="targetSavingsRatePercent"
+                render={({ field }) => (
+                  <FormItem>
+                    <div className="flex items-center gap-1">
+                      <FormLabel>Target savings rate (%)</FormLabel>
+                      <InfoTooltip>
+                        Optional benchmark for the Summary dashboard savings-rate card. Leave blank to
+                        use the default 40%.
+                      </InfoTooltip>
+                    </div>
+                    <FormControl>
+                      <Input
+                        type="number"
+                        step="0.01"
+                        min={0}
+                        max={100}
+                        placeholder="40"
+                        {...field}
+                        value={typeof field.value === "number" || typeof field.value === "string" ? field.value : ""}
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>

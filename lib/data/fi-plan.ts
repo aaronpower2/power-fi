@@ -61,6 +61,11 @@ export type SummaryViewModel = {
   monthlyInvestable: number | null
   currentMonthActualInvestable: number | null
   monthlyInvestableFallbackMessage: string | null
+  savingsRateCurrent: number | null
+  savingsRateCurrentLabel: string | null
+  savingsRateRolling3Month: number | null
+  savingsRateTarget: number
+  savingsRateTargetIsDefault: boolean
   staleLiabilityNames: string[]
   liabilitiesWithNoPaydownTracking: { id: string; name: string; balance: number }[]
   paydownDivergenceNotes: string[]
@@ -101,6 +106,11 @@ function emptySummary(): SummaryViewModel {
     monthlyInvestable: null,
     currentMonthActualInvestable: null,
     monthlyInvestableFallbackMessage: null,
+    savingsRateCurrent: null,
+    savingsRateCurrentLabel: null,
+    savingsRateRolling3Month: null,
+    savingsRateTarget: 0.4,
+    savingsRateTargetIsDefault: true,
     staleLiabilityNames: [],
     liabilitiesWithNoPaydownTracking: [],
     paydownDivergenceNotes: [],
@@ -184,6 +194,80 @@ function toEngineAssetConverted(a: {
   }
 }
 
+type SavingsRateTotals = {
+  income: number
+  expenses: number
+}
+
+type FlowRecordForSavingsRate = {
+  occurredOn: string
+  amount: string
+  currency: string | null
+}
+
+export function rateFromSavingsRateTotals(totals: SavingsRateTotals): number | null {
+  if (!Number.isFinite(totals.income) || totals.income <= 0) return null
+  return (totals.income - totals.expenses) / totals.income
+}
+
+export function summarizeSavingsRateMonths(args: {
+  monthTotals: ReadonlyMap<string, SavingsRateTotals>
+  currentMonth: string
+}): {
+  currentRate: number | null
+  rollingAvg3Month: number | null
+} {
+  const currentTotals = args.monthTotals.get(args.currentMonth) ?? { income: 0, expenses: 0 }
+  const currentRate = rateFromSavingsRateTotals(currentTotals)
+  const closedRates = [...args.monthTotals.entries()]
+    .filter(([month]) => month < args.currentMonth)
+    .sort((a, b) => b[0].localeCompare(a[0]))
+    .map(([, totals]) => rateFromSavingsRateTotals(totals))
+    .filter((rate): rate is number => rate != null)
+    .slice(0, 3)
+
+  const rollingAvg3Month =
+    closedRates.length > 0
+      ? closedRates.reduce((sum, rate) => sum + rate, 0) / closedRates.length
+      : null
+
+  return { currentRate, rollingAvg3Month }
+}
+
+export function buildSavingsRateMonthTotals(args: {
+  incomeRows: readonly FlowRecordForSavingsRate[]
+  expenseRows: readonly FlowRecordForSavingsRate[]
+  reportingCurrency: string
+  rates: Map<string, number>
+}): { monthTotals: Map<string, SavingsRateTotals>; ok: boolean } {
+  const monthTotals = new Map<string, SavingsRateTotals>()
+
+  const addAmount = (
+    month: string,
+    kind: keyof SavingsRateTotals,
+    amount: string,
+    currency: string | null,
+  ) => {
+    const converted = convertAmount(Number(amount), currency ?? "USD", args.reportingCurrency, args.rates)
+    if (converted == null) return false
+    const entry = monthTotals.get(month) ?? { income: 0, expenses: 0 }
+    entry[kind] += converted
+    monthTotals.set(month, entry)
+    return true
+  }
+
+  for (const row of args.incomeRows) {
+    const month = row.occurredOn.slice(0, 7)
+    if (!addAmount(month, "income", row.amount, row.currency)) return { monthTotals, ok: false }
+  }
+  for (const row of args.expenseRows) {
+    const month = row.occurredOn.slice(0, 7)
+    if (!addAmount(month, "expenses", row.amount, row.currency)) return { monthTotals, ok: false }
+  }
+
+  return { monthTotals, ok: true }
+}
+
 export async function getFiPlanPageData(opts?: {
   goalId?: string | null
   /**
@@ -231,6 +315,8 @@ export async function getFiPlanPageData(opts?: {
     const goalCurrency = goal.currency ?? "USD"
     const reportingCurrency = resolveFiReportingCurrency(opts, goalCurrency)
     const withdrawalRate = Number(goal.withdrawalRate)
+    const savingsRateTarget = Number(goal.targetSavingsRate ?? 0.4)
+    const savingsRateTargetIsDefault = goal.targetSavingsRate == null
     const monthlyFunding = Number(goal.monthlyFundingRequirement)
     const req = requiredPrincipal(monthlyFunding, withdrawalRate)
     const fiDate = new Date(`${goal.fiDate}T12:00:00Z`)
@@ -402,10 +488,18 @@ export async function getFiPlanPageData(opts?: {
       .select()
       .from(incomeRecords)
       .where(and(gte(incomeRecords.occurredOn, start), lte(incomeRecords.occurredOn, end)))
+    const historicalIncomeRows = await db
+      .select()
+      .from(incomeRecords)
+      .where(lte(incomeRecords.occurredOn, end))
     const expenseRows = await db
       .select()
       .from(expenseRecords)
       .where(and(gte(expenseRecords.occurredOn, start), lte(expenseRecords.occurredOn, end)))
+    const historicalExpenseRows = await db
+      .select()
+      .from(expenseRecords)
+      .where(lte(expenseRecords.occurredOn, end))
 
     let incomeConv = 0
     for (const r of incomeRows) {
@@ -464,6 +558,39 @@ export async function getFiPlanPageData(opts?: {
     }
 
     const currentMonthActualInvestable = Math.max(0, incomeConv - expenseConv)
+    const savingsRateMonthTotals = buildSavingsRateMonthTotals({
+      incomeRows: historicalIncomeRows,
+      expenseRows: historicalExpenseRows,
+      reportingCurrency: goalCurrency,
+      rates,
+    })
+    if (!savingsRateMonthTotals.ok) {
+      return {
+        summary: buildSummary({
+          goalFundable: null,
+          shortfall: null,
+          netWorth,
+          monthsToFi,
+          requiredPrincipal: finiteReq ? req : null,
+          assumedWithdrawalRate: withdrawalRate,
+          reportingGoalId: goal.id,
+          goalFiDate: goal.fiDate,
+          reportingCurrency: goalCurrency,
+          fxAsOfDate: fx.asOfDate,
+          fxWarning: `Could not convert savings-rate history to ${goalCurrency}.`,
+          savingsRateTarget,
+          savingsRateTargetIsDefault,
+        }),
+        goalOptions,
+        monthlyInvestable: null,
+        projectedNetWorthAtFi: null,
+        summaryCurrencyOptions: BUDGET_SUMMARY_CURRENCIES,
+      }
+    }
+    const savingsRateSummary = summarizeSavingsRateMonths({
+      monthTotals: savingsRateMonthTotals.monthTotals,
+      currentMonth: currentMonthLabel,
+    })
     let plannedIncome = 0
     for (const line of incomeLineRows) {
       const { currency, amount } = monthlyPlannedForLine(line, start, end)
@@ -843,6 +970,11 @@ export async function getFiPlanPageData(opts?: {
         monthlyInvestable: displayMonthlyInvestable,
         currentMonthActualInvestable: displayCurrentMonthActualInvestable,
         monthlyInvestableFallbackMessage,
+        savingsRateCurrent: savingsRateSummary.currentRate,
+        savingsRateCurrentLabel: currentMonthLabel,
+        savingsRateRolling3Month: savingsRateSummary.rollingAvg3Month,
+        savingsRateTarget,
+        savingsRateTargetIsDefault,
         staleLiabilityNames,
         liabilitiesWithNoPaydownTracking: displayLiabilitiesWithNoPaydownTracking,
         paydownDivergenceNotes,

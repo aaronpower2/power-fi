@@ -34,6 +34,7 @@ export const goals = pgTable("goals", {
   name: varchar("name", { length: 256 }),
   fiDate: date("fi_date").notNull(),
   withdrawalRate: numeric("withdrawal_rate", { precision: 10, scale: 6 }).notNull(),
+  targetSavingsRate: numeric("target_savings_rate", { precision: 5, scale: 4 }),
   monthlyFundingRequirement: numeric("monthly_funding_requirement", {
     precision: 16,
     scale: 2,

@@ -127,6 +127,13 @@
       "when": 1775563200000,
       "tag": "0017_debt_payment_lines",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1775566800000,
+      "tag": "0018_goal_target_savings_rate",
+      "breakpoints": true
     }
   ]
 }
