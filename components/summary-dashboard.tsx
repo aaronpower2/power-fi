@@ -11,8 +11,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton"
 import { CardHeaderTitleRow, InfoTooltip } from "@/components/info-tooltip"
 import { SummaryChart } from "@/components/summary-chart"
-import { SavingsRateCard } from "@/components/summary/savings-rate-card"
-import { Progress } from "@/components/ui/progress"
+import { CashFlowHealthCard } from "@/components/summary/savings-rate-card"
 import type { getSummaryData } from "@/lib/data/summary"
 import {
   formatCurrency,
@@ -54,62 +53,57 @@ export function SummaryDashboard({ data }: { data: SummaryData }) {
           {data.fxWarning}
         </p>
       ) : null}
-      <div
-        className={cn(
-          "grid gap-4 sm:grid-cols-2",
-          data.coastFiNumber != null ? "xl:grid-cols-7" : "xl:grid-cols-6",
-        )}
-      >
-        <MetricCard
+      <div className="grid gap-4 lg:grid-cols-3">
+        <HeroMetricCard
           title="Goal status"
           info="Whether current portfolio trajectory can fund your target lifestyle at the FI date."
-          value={data.goalFundable === null ? "—" : data.goalFundable ? "On track" : "Gap"}
+          value={data.goalFundable === null ? "—" : data.goalFundable ? "On track" : "Off Target"}
+          tone={
+            data.goalFundable == null ? "neutral" : data.goalFundable ? "positive" : "negative"
+          }
           detail={
             data.goalFundable === false && data.shortfall != null
               ? `${formatCurrency(data.shortfall, ccy, { maximumFractionDigits: 0 })} below target`
               : undefined
           }
         />
-        <MetricCard
+        <HeroMetricCard
           title="Net worth"
           info="Full balance sheet: all asset balances minus all liabilities, in the reporting currency you select in the control bar (converted from each line’s currency)."
           value={formatCurrency(data.netWorth, ccy, { maximumFractionDigits: 0 })}
         />
-        <MetricCard
-          title="Months to FI"
-          info="Calendar months from today to your goal FI date."
-          value={formatMonths(data.monthsToFi)}
-        />
-        <MetricCard
-          title="Required portfolio"
-          info="Portfolio size implied by lifestyle funding and your withdrawal rate."
-          value={formatCurrency(data.requiredPrincipal ?? null, ccy, {
-            maximumFractionDigits: 0,
-          })}
-        />
-        <MetricCard
-          title="Monthly investable"
-          info="Planned recurring income minus planned recurring expenses. This value drives the projection; current-month actuals are shown as context."
-          value={formatCurrency(data.monthlyInvestable, ccy, {
-            maximumFractionDigits: 0,
-          })}
-          detail={
-            data.currentMonthActualInvestable != null
-              ? `This month so far: ${formatCurrency(data.currentMonthActualInvestable, ccy, {
-                  maximumFractionDigits: 0,
-                })}`
-              : undefined
-          }
-        />
-        <SavingsRateCard
+        <CashFlowHealthCard
+          monthlyInvestable={data.monthlyInvestable}
+          currentMonthActualInvestable={data.currentMonthActualInvestable}
+          currencyCode={ccy}
           currentRate={data.savingsRateCurrent}
           rollingAvg={data.savingsRateRolling3Month}
           targetRate={data.savingsRateTarget}
           targetIsDefault={data.savingsRateTargetIsDefault}
           currentMonth={data.savingsRateCurrentLabel}
         />
+      </div>
+      <div
+        className={cn(
+          "grid gap-3",
+          data.coastFiNumber != null ? "sm:grid-cols-2 lg:grid-cols-3" : "sm:grid-cols-2",
+        )}
+      >
+        <CompactMetricStat
+          title="Months to FI"
+          info="Calendar months from today to your goal FI date."
+          value={formatMonths(data.monthsToFi)}
+        />
+        <CompactMetricStat
+          title="Required portfolio"
+          info="Portfolio size implied by lifestyle funding and your withdrawal rate. This is the Target reference line on the chart below."
+          value={formatCurrency(data.requiredPrincipal ?? null, ccy, {
+            maximumFractionDigits: 0,
+          })}
+          detail="Shown as Target on the chart"
+        />
         {data.coastFiNumber != null ? (
-          <CoastFiCard
+          <CoastFiStat
             coastFiNumber={data.coastFiNumber}
             coastFiProgress={data.coastFiProgress}
             coastFiReachedMonth={data.coastFiReachedMonth}
@@ -198,7 +192,7 @@ export function SummaryDashboard({ data }: { data: SummaryData }) {
   )
 }
 
-function CoastFiCard({
+function CoastFiStat({
   coastFiNumber,
   coastFiProgress,
   coastFiReachedMonth,
@@ -210,63 +204,88 @@ function CoastFiCard({
   currencyCode: string
 }) {
   const progressValue = Math.max(0, Math.min(100, Math.round((coastFiProgress ?? 0) * 100)))
-  const remainingGap =
-    coastFiProgress != null ? Math.max(0, coastFiNumber * (1 - coastFiProgress)) : null
   const alreadyReached = progressValue >= 100
+  const progressLabel = coastFiProgress == null ? null : `${formatPercent(coastFiProgress)} reached`
   const reachedLabel = alreadyReached
     ? "Already reached"
     : coastFiReachedMonth
-      ? `Reached: ~${formatYearMonthLabel(coastFiReachedMonth)}`
+      ? `~${formatYearMonthLabel(coastFiReachedMonth)}`
       : "Not reached by FI date"
 
   return (
-    <Card>
+    <CompactMetricStat
+      title="Coast FI"
+      info={
+        <>
+          <p>
+            The FI-plan balance where you could stop contributing and let compounding carry you to
+            your full FI target by the goal date.
+          </p>
+          <p className="text-muted-foreground mt-2">
+            Uses FI-scoped assets and the same liability-adjusted basis as the projection chart. The
+            same threshold is marked as Coast FI on the chart below.
+          </p>
+        </>
+      }
+      value={formatCurrency(coastFiNumber, currencyCode, { maximumFractionDigits: 0 })}
+      detail={[progressLabel, reachedLabel].filter(Boolean).join(" · ")}
+    />
+  )
+}
+
+function HeroMetricCard({
+  title,
+  info,
+  value,
+  tone = "neutral",
+  detail,
+}: {
+  title: string
+  info: ReactNode
+  value: string
+  tone?: "neutral" | "positive" | "negative"
+  detail?: string
+}) {
+  const toneClasses =
+    tone === "positive"
+      ? {
+          card: "border-primary/20 bg-primary/5",
+          value: "text-primary",
+          detail: "text-primary/80",
+        }
+      : tone === "negative"
+        ? {
+            card: "border-destructive/20 bg-destructive/5",
+            value: "text-destructive",
+            detail: "text-destructive/80",
+          }
+        : {
+            card: "",
+            value: "",
+            detail: "text-muted-foreground",
+          }
+
+  return (
+    <Card className={toneClasses.card}>
       <CardHeader className="pb-2">
         <CardHeaderTitleRow
-          title={<CardTitle className="text-base">Coast FI</CardTitle>}
-          info={
-            <>
-              <p>
-                The FI-plan balance where you could stop contributing and let compounding carry you
-                to your full FI target by the goal date.
-              </p>
-              <p className="mt-2 text-muted-foreground">
-                Uses FI-scoped assets and the same liability-adjusted basis as the projection chart.
-              </p>
-            </>
-          }
+          title={<CardTitle className="text-base">{title}</CardTitle>}
+          info={info}
         />
       </CardHeader>
-      <CardContent className="flex flex-col gap-3">
-        <p className="font-heading text-2xl font-semibold tabular-nums">
-          {formatCurrency(coastFiNumber, currencyCode, { maximumFractionDigits: 0 })}
+      <CardContent className="space-y-1">
+        <p className={cn("font-heading text-3xl font-semibold tabular-nums", toneClasses.value)}>
+          {value}
         </p>
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-3">
-            <Progress
-              value={progressValue}
-              className="h-2 flex-1"
-              aria-label={`Coast FI progress ${progressValue}%`}
-            />
-            <span className="text-muted-foreground text-xs tabular-nums">
-              {formatPercent((coastFiProgress ?? 0) / 1)}
-            </span>
-          </div>
-          <p className="text-muted-foreground text-xs">
-            {alreadyReached
-              ? "Your FI plan is already at the Coast FI threshold."
-              : remainingGap != null
-                ? `${formatCurrency(remainingGap, currencyCode, { maximumFractionDigits: 0 })} remaining`
-                : "—"}
-          </p>
-          <p className="text-muted-foreground text-xs">{reachedLabel}</p>
-        </div>
+        {detail ? (
+          <p className={cn("text-xs", toneClasses.detail)}>{detail}</p>
+        ) : null}
       </CardContent>
     </Card>
   )
 }
 
-function MetricCard({
+function CompactMetricStat({
   title,
   info,
   value,
@@ -278,19 +297,13 @@ function MetricCard({
   detail?: string
 }) {
   return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardHeaderTitleRow
-          title={<CardTitle className="text-base">{title}</CardTitle>}
-          info={info}
-        />
-      </CardHeader>
-      <CardContent>
-        <p className="font-heading text-2xl font-semibold tabular-nums">{value}</p>
-        {detail ? (
-          <p className="text-muted-foreground mt-1 text-xs">{detail}</p>
-        ) : null}
-      </CardContent>
-    </Card>
+    <div className="bg-muted/20 rounded-lg border px-4 py-3">
+      <div className="mb-2 flex items-start gap-2">
+        <p className="min-w-0 flex-1 text-sm font-medium">{title}</p>
+        <InfoTooltip className="size-5">{info}</InfoTooltip>
+      </div>
+      <p className="font-heading text-xl font-semibold tabular-nums">{value}</p>
+      {detail ? <p className="text-muted-foreground mt-1 text-xs">{detail}</p> : null}
+    </div>
   )
 }

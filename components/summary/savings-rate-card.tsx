@@ -3,22 +3,29 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { CardHeaderTitleRow } from "@/components/info-tooltip"
-import { formatPercent, formatYearMonthLabel } from "@/lib/format"
+import { formatCurrency, formatPercent, formatYearMonthLabel } from "@/lib/format"
 import { cn } from "@/lib/utils"
 
-export function SavingsRateCard({
+export function CashFlowHealthCard({
+  monthlyInvestable,
+  currentMonthActualInvestable,
+  currencyCode,
   currentRate,
   rollingAvg,
   targetRate,
   targetIsDefault,
   currentMonth,
 }: {
+  monthlyInvestable: number | null
+  currentMonthActualInvestable: number | null
+  currencyCode: string
   currentRate: number | null
   rollingAvg: number | null
   targetRate: number
   targetIsDefault: boolean
   currentMonth: string | null
 }) {
+  const hasSavingsData = currentRate != null
   const progressValue =
     currentRate != null ? Math.max(0, Math.min(100, Math.round(currentRate * 100))) : 0
   const targetMarkerValue = Math.max(0, Math.min(100, Math.round(targetRate * 100)))
@@ -34,31 +41,57 @@ export function SavingsRateCard({
       : currentRate >= targetRate
         ? "bg-primary"
         : "bg-destructive"
+  const targetLabel = `Target: ${formatPercent(targetRate)}${targetIsDefault ? " default" : ""}`
 
   return (
     <Card>
       <CardHeader className="pb-2">
         <CardHeaderTitleRow
-          title={<CardTitle className="text-base">Savings Rate</CardTitle>}
-          info="Current month-to-date savings rate and a rolling average over the last three closed months. Savings rate is income minus expenses, divided by income."
+          title={<CardTitle className="text-base">Cash flow health</CardTitle>}
+          info={
+            <>
+              <p>
+                Monthly investable is planned recurring income minus planned recurring expenses. This
+                amount feeds the FI projection.
+              </p>
+              <p className="mt-2">
+                Savings rate is income minus expenses, divided by income. The bar shows the current
+                month-to-date rate against your target, plus the rolling average over the last three
+                closed months.
+              </p>
+            </>
+          }
         />
       </CardHeader>
-      <CardContent className="flex flex-col gap-3">
-        <p className="text-muted-foreground text-xs">
-          {currentMonth ? `${formatYearMonthLabel(currentMonth)} month-to-date` : "Current month-to-date"}
-        </p>
-        {currentRate == null ? (
-          <div className="space-y-2">
-            <p className="font-heading text-2xl font-semibold tabular-nums">—</p>
-            <p className="text-muted-foreground text-xs">
-              No data yet — add income and expenses in Cash Flow.
-            </p>
+      <CardContent className="space-y-4">
+        <div className="space-y-1">
+          <p className="text-muted-foreground text-xs">Monthly investable</p>
+          <p className="font-heading text-3xl font-semibold tabular-nums">
+            {formatCurrency(monthlyInvestable, currencyCode, { maximumFractionDigits: 0 })}
+          </p>
+          <p className="text-muted-foreground text-xs">
+            {currentMonthActualInvestable != null
+              ? `This month so far: ${formatCurrency(currentMonthActualInvestable, currencyCode, {
+                  maximumFractionDigits: 0,
+                })}`
+              : "Used as the recurring contribution in the FI projection."}
+          </p>
+        </div>
+        <div className="space-y-3 border-t pt-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="space-y-1">
+              <p className="text-muted-foreground text-xs">
+                {currentMonth
+                  ? `${formatYearMonthLabel(currentMonth)} savings rate`
+                  : "Current savings rate"}
+              </p>
+              <p className={cn("font-heading text-2xl font-semibold tabular-nums", toneClass)}>
+                {hasSavingsData ? formatPercent(currentRate) : "—"}
+              </p>
+            </div>
+            <p className="text-muted-foreground text-right text-xs">{targetLabel}</p>
           </div>
-        ) : (
-          <>
-            <p className={cn("font-heading text-2xl font-semibold tabular-nums", toneClass)}>
-              {formatPercent(currentRate)}
-            </p>
+          {hasSavingsData ? (
             <div className="space-y-2">
               <div className="relative">
                 <Progress
@@ -74,11 +107,15 @@ export function SavingsRateCard({
                 />
               </div>
               <p className="text-muted-foreground text-xs">
-                3-month avg: {formatPercent(rollingAvg)}
+                3-month avg: {rollingAvg == null ? "—" : formatPercent(rollingAvg)}
               </p>
             </div>
-          </>
-        )}
+          ) : (
+            <p className="text-muted-foreground text-xs">
+              No data yet — add income and expenses in Cash Flow.
+            </p>
+          )}
+        </div>
       </CardContent>
     </Card>
   )
