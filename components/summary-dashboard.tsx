@@ -11,7 +11,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton"
 import { CardHeaderTitleRow, InfoTooltip } from "@/components/info-tooltip"
 import { SummaryChart } from "@/components/summary-chart"
-import { CashFlowHealthCard } from "@/components/summary/savings-rate-card"
+import { SavingsRateStat } from "@/components/summary/savings-rate-card"
 import type { getSummaryData } from "@/lib/data/summary"
 import {
   formatCurrency,
@@ -72,21 +72,25 @@ export function SummaryDashboard({ data }: { data: SummaryData }) {
           info="Full balance sheet: all asset balances minus all liabilities, in the reporting currency you select in the control bar (converted from each line’s currency)."
           value={formatCurrency(data.netWorth, ccy, { maximumFractionDigits: 0 })}
         />
-        <CashFlowHealthCard
-          monthlyInvestable={data.monthlyInvestable}
-          currentMonthActualInvestable={data.currentMonthActualInvestable}
-          currencyCode={ccy}
-          currentRate={data.savingsRateCurrent}
-          rollingAvg={data.savingsRateRolling3Month}
-          targetRate={data.savingsRateTarget}
-          targetIsDefault={data.savingsRateTargetIsDefault}
-          currentMonth={data.savingsRateCurrentLabel}
+        <HeroMetricCard
+          title="Monthly investable"
+          info="Planned recurring income minus planned recurring expenses. This value drives the projection; current-month actuals are shown as context."
+          value={formatCurrency(data.monthlyInvestable, ccy, {
+            maximumFractionDigits: 0,
+          })}
+          detail={
+            data.currentMonthActualInvestable != null
+              ? `This month so far: ${formatCurrency(data.currentMonthActualInvestable, ccy, {
+                  maximumFractionDigits: 0,
+                })}`
+              : "Used as the recurring contribution in the FI projection."
+          }
         />
       </div>
       <div
         className={cn(
           "grid gap-3",
-          data.coastFiNumber != null ? "sm:grid-cols-2 lg:grid-cols-3" : "sm:grid-cols-2",
+          data.coastFiNumber != null ? "sm:grid-cols-2 lg:grid-cols-4" : "sm:grid-cols-2 lg:grid-cols-3",
         )}
       >
         <CompactMetricStat
@@ -101,6 +105,13 @@ export function SummaryDashboard({ data }: { data: SummaryData }) {
             maximumFractionDigits: 0,
           })}
           detail="Shown as Target on the chart"
+        />
+        <SavingsRateStat
+          currentRate={data.savingsRateCurrent}
+          rollingAvg={data.savingsRateRolling3Month}
+          targetRate={data.savingsRateTarget}
+          targetIsDefault={data.savingsRateTargetIsDefault}
+          currentMonth={data.savingsRateCurrentLabel}
         />
         {data.coastFiNumber != null ? (
           <CoastFiStat

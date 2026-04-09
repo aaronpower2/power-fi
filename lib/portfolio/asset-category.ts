@@ -12,6 +12,7 @@ export const ASSET_CATEGORY_VALUES = [
 ] as const
 
 export type AssetCategory = (typeof ASSET_CATEGORY_VALUES)[number]
+export type AssetGrowthType = "compound" | "capital"
 
 export const assetCategorySchema = z.enum(ASSET_CATEGORY_VALUES)
 
@@ -53,16 +54,67 @@ export function defaultIncludeInFi(category: AssetCategory): boolean {
   }
 }
 
+export function isRealEstateAssetCategory(
+  category: unknown
+): category is AssetCategory {
+  return category === "real_estate_primary" || category === "real_estate_rental"
+}
+
+export function defaultGrowthType(category: AssetCategory): AssetGrowthType {
+  switch (category) {
+    case "vehicle":
+    case "depreciating_other":
+      return "capital"
+    case "investment":
+    case "cash":
+    case "real_estate_primary":
+    case "real_estate_rental":
+    case "other":
+      return "compound"
+    default:
+      return "compound"
+  }
+}
+
+export function allowedGrowthTypesForCategory(
+  category: AssetCategory
+): AssetGrowthType[] {
+  return isRealEstateAssetCategory(category)
+    ? ["compound"]
+    : ["compound", "capital"]
+}
+
+export function isGrowthTypeAllowedForCategory(
+  category: AssetCategory,
+  growthType: AssetGrowthType
+): boolean {
+  return allowedGrowthTypesForCategory(category).includes(growthType)
+}
+
+export function growthTypeLabel(growthType: AssetGrowthType): string {
+  return growthType === "compound" ? "Annual growth" : "Future revaluation"
+}
+
 /** Map legacy free-text asset_type to category for migrations / imports. */
-export function inferAssetCategoryFromLegacyAssetType(assetType: string): AssetCategory {
+export function inferAssetCategoryFromLegacyAssetType(
+  assetType: string
+): AssetCategory {
   const t = assetType.trim().toLowerCase()
   if (t === "cash") return "cash"
-  if (t === "equity" || t.includes("stock") || t.includes("etf") || t.includes("bond"))
+  if (
+    t === "equity" ||
+    t.includes("stock") ||
+    t.includes("etf") ||
+    t.includes("bond")
+  )
     return "investment"
-  if (t.includes("vehicle") || t.includes("car") || t === "auto") return "vehicle"
-  if (t.includes("rental") || t.includes("investment property")) return "real_estate_rental"
+  if (t.includes("vehicle") || t.includes("car") || t === "auto")
+    return "vehicle"
+  if (t.includes("rental") || t.includes("investment property"))
+    return "real_estate_rental"
   if (t.includes("real estate") || t.includes("home") || t.includes("primary"))
     return "real_estate_primary"
-  if (t.includes("depreciat") || t.includes("appliance")) return "depreciating_other"
+  if (t.includes("depreciat") || t.includes("appliance"))
+    return "depreciating_other"
   return "other"
 }

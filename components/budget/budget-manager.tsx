@@ -77,6 +77,7 @@ import {
   FormMessage,
 } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
+import { DecimalMoneyInput } from "@/components/ui/numeric-input"
 import { Label } from "@/components/ui/label"
 import {
   Select,
@@ -479,9 +480,11 @@ type ExpenseCategoryDraft = {
   recurringCurrency: string
 }
 
-function normalizeWholeCurrencyAmountInput(value: string | number | null | undefined) {
+function normalizeCurrencyAmountInput(value: string | number | null | undefined) {
   if (value == null || value === "") return ""
-  return String(value).replace(/\..*$/, "")
+  const parsed = typeof value === "number" ? value : Number(value)
+  if (!Number.isFinite(parsed)) return ""
+  return String(Math.round(parsed * 100) / 100)
 }
 
 function normalizeExpenseCategoryCurrency(code: string | null | undefined): SupportedCurrency {
@@ -495,7 +498,7 @@ function expenseCategoryToDraft(c: BudgetData["expenseCategories"][number]): Exp
     linkedLiabilityId: c.linkedLiabilityId ?? "",
     isRecurring: c.isRecurring,
     frequency: parseBudgetFrequency(c.frequency) ?? "monthly",
-    recurringAmount: normalizeWholeCurrencyAmountInput(c.recurringAmount),
+    recurringAmount: normalizeCurrencyAmountInput(c.recurringAmount),
     recurringCurrency: c.isRecurring ? normalizeExpenseCategoryCurrency(c.recurringCurrency) : "AED",
   }
 }
@@ -598,16 +601,14 @@ function ExpenseCategoryInlineManageRow({
             ))}
           </SelectContent>
         </Select>
-        <Input
-          type="number"
-          step="1"
+        <DecimalMoneyInput
           min="0"
           disabled={disabled || !planEnabled}
           value={draft.recurringAmount}
-          onChange={(e) =>
+          onValueChange={(value) =>
             onDraftChange({
               ...draft,
-              recurringAmount: normalizeWholeCurrencyAmountInput(e.target.value),
+              recurringAmount: value === "" ? "" : String(value),
             })
           }
           className={cn(controlH, "w-24 shrink-0 tabular-nums")}
@@ -1217,9 +1218,7 @@ function IncomeLineFormDialog({
         isRecurring: line?.isRecurring ?? false,
         frequency: freq,
         recurringAmount:
-          line?.recurringAmount != null && line.recurringAmount !== ""
-            ? String(line.recurringAmount)
-            : "",
+          normalizeCurrencyAmountInput(line?.recurringAmount),
         recurringCurrency: line?.recurringCurrency ?? "AED",
         recurringAnchorDate: normalizeRecurringAnchorDate(line?.recurringAnchorDate) ?? "",
       })
@@ -1366,7 +1365,12 @@ function IncomeLineFormDialog({
                     <FormItem>
                       <FormLabel>Amount per pay period</FormLabel>
                       <FormControl>
-                        <Input type="number" step="0.01" min="0" {...field} />
+                        <DecimalMoneyInput
+                          min="0"
+                          {...field}
+                          value={field.value ?? ""}
+                          onValueChange={(value) => field.onChange(value === "" ? "" : String(value))}
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -1536,7 +1540,7 @@ function IncomeRecordsDialog({
                 <FormItem className="min-w-[100px] flex-1">
                   <FormLabel>Amount</FormLabel>
                   <FormControl>
-                    <Input type="number" step="0.01" {...field} />
+                    <DecimalMoneyInput {...field} onValueChange={field.onChange} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -2430,9 +2434,7 @@ function ExpenseCategoryFormDialog({
         isRecurring: category?.isRecurring ?? false,
         frequency: freq,
         recurringAmount:
-          category?.recurringAmount != null && category.recurringAmount !== ""
-            ? String(category.recurringAmount)
-            : "",
+          normalizeCurrencyAmountInput(category?.recurringAmount),
         recurringCurrency: normalizeExpenseCategoryCurrency(category?.recurringCurrency),
       })
     }
@@ -2627,7 +2629,12 @@ function ExpenseCategoryFormDialog({
                     <FormItem>
                       <FormLabel>Amount per period</FormLabel>
                       <FormControl>
-                        <Input type="number" step="0.01" min="0" {...field} />
+                        <DecimalMoneyInput
+                          min="0"
+                          {...field}
+                          value={field.value ?? ""}
+                          onValueChange={(value) => field.onChange(value === "" ? "" : String(value))}
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -2703,7 +2710,7 @@ function DebtPaymentLineFormDialog({
       linkedLiabilityId: line?.linkedLiabilityId ?? fallbackLiabilityId,
       isRecurring: line?.isRecurring ?? true,
       frequency: (parseBudgetFrequency(line?.frequency ?? null) ?? "monthly") as BudgetRecurringFrequency,
-      recurringAmount: normalizeWholeCurrencyAmountInput(line?.recurringAmount),
+      recurringAmount: normalizeCurrencyAmountInput(line?.recurringAmount),
       recurringCurrency: coalesceSupportedCurrency(line?.recurringCurrency ?? null, fallbackCurrency),
     },
   })
@@ -2734,7 +2741,7 @@ function DebtPaymentLineFormDialog({
         linkedLiabilityId: line?.linkedLiabilityId ?? fallbackLiabilityId,
         isRecurring: line?.isRecurring ?? true,
         frequency: (parseBudgetFrequency(line?.frequency ?? null) ?? "monthly") as BudgetRecurringFrequency,
-        recurringAmount: normalizeWholeCurrencyAmountInput(line?.recurringAmount),
+        recurringAmount: normalizeCurrencyAmountInput(line?.recurringAmount),
         recurringCurrency: coalesceSupportedCurrency(
           line?.recurringCurrency ?? null,
           coalesceSupportedCurrency(matchedLiability?.currency ?? null, fallbackCurrency),
@@ -2882,7 +2889,13 @@ function DebtPaymentLineFormDialog({
                     <FormItem>
                       <FormLabel>Amount</FormLabel>
                       <FormControl>
-                        <Input type="number" step="0.01" min="0" placeholder="0.00" {...field} />
+                        <DecimalMoneyInput
+                          min="0"
+                          placeholder="0.00"
+                          {...field}
+                          value={field.value ?? ""}
+                          onValueChange={(value) => field.onChange(value === "" ? "" : String(value))}
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -3119,7 +3132,13 @@ function ExpenseLineFormDialog({
                   <FormItem>
                     <FormLabel>Value ({recordCurrency})</FormLabel>
                     <FormControl>
-                      <Input type="number" step="0.01" min="0" placeholder="0.00" {...field} />
+                      <DecimalMoneyInput
+                        min="0"
+                        placeholder="0.00"
+                        {...field}
+                        value={field.value ?? ""}
+                        onValueChange={(value) => field.onChange(value === "" ? "" : String(value))}
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -3220,7 +3239,7 @@ function EditExpenseRecordDialog({
                 <FormItem>
                   <FormLabel>Amount</FormLabel>
                   <FormControl>
-                    <Input type="number" step="0.01" {...field} />
+                    <DecimalMoneyInput {...field} onValueChange={field.onChange} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -3396,7 +3415,7 @@ function ExpenseRecordsDialog({
                 <FormItem className="min-w-[100px] flex-1">
                   <FormLabel>Amount</FormLabel>
                   <FormControl>
-                    <Input type="number" step="0.01" {...field} />
+                    <DecimalMoneyInput {...field} onValueChange={field.onChange} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>

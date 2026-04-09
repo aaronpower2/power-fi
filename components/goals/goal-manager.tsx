@@ -42,6 +42,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
+import { IntegerInput, PercentInput } from "@/components/ui/numeric-input"
 import { Label } from "@/components/ui/label"
 import {
   Select,
@@ -86,6 +87,25 @@ type CopyRow = BudgetCategoryPlannedForGoalCopy & {
   amountInGoal: number | null
   selectable: boolean
   reasonDisabled: string | null
+}
+
+function roundToSingleDecimal(value: number | null | undefined): number | undefined {
+  if (value == null || !Number.isFinite(value)) return undefined
+  return Math.round(value * 10) / 10
+}
+
+function normalizeGoalPercentValues<T extends {
+  withdrawalRatePercent: number
+  targetSavingsRatePercent: number | null | undefined
+}>(values: T): T {
+  return {
+    ...values,
+    withdrawalRatePercent: roundToSingleDecimal(values.withdrawalRatePercent) ?? values.withdrawalRatePercent,
+    targetSavingsRatePercent:
+      values.targetSavingsRatePercent == null
+        ? null
+        : (roundToSingleDecimal(values.targetSavingsRatePercent) ?? values.targetSavingsRatePercent),
+  }
 }
 
 function GoalPlanMetric({
@@ -396,7 +416,7 @@ function LifestyleLinesFields({
                 <FormItem className="w-full gap-1.5 sm:w-36">
                   <FormLabel className="sr-only">Monthly cost (line {index + 1})</FormLabel>
                   <FormControl>
-                    <Input type="number" step="1" min={1} placeholder="0" {...f} />
+                    <IntegerInput min={1} placeholder="0" {...f} onValueChange={f.onChange} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -741,7 +761,7 @@ function GoalEditForm({
   const goalCurrency = useWatch({ control: form.control, name: "currency" }) ?? "USD"
 
   async function onSubmit(values: UpdateGoalInput) {
-    const r = await updateGoal(values)
+    const r = await updateGoal(normalizeGoalPercentValues(values))
     if (r.ok) {
       toast.success("Goal updated")
       onSuccess()
@@ -817,7 +837,13 @@ function GoalEditForm({
                     <InfoTooltip>Annual rate; enter 4 for the 4% rule (stored as a decimal internally).</InfoTooltip>
                   </div>
                   <FormControl>
-                    <Input type="number" step="0.01" min={0.1} max={50} {...field} />
+                    <PercentInput
+                      min={0.1}
+                      max={50}
+                      {...field}
+                      onValueChange={field.onChange}
+                      onBlur={field.onBlur}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -836,14 +862,14 @@ function GoalEditForm({
                     </InfoTooltip>
                   </div>
                   <FormControl>
-                    <Input
-                      type="number"
-                      step="0.01"
+                    <PercentInput
                       min={0}
                       max={100}
-                      placeholder="40"
+                      placeholder="40.0"
                       {...field}
                       value={typeof field.value === "number" || typeof field.value === "string" ? field.value : ""}
+                      onValueChange={field.onChange}
+                      onBlur={field.onBlur}
                     />
                   </FormControl>
                   <FormMessage />
@@ -938,7 +964,7 @@ function CreateGoalDialog({
   const createCurrency = useWatch({ control: form.control, name: "currency" }) ?? "USD"
 
   async function onSubmit(values: GoalInput) {
-    const payload: CreateGoalInput = { ...values, makeActive }
+    const payload: CreateGoalInput = { ...normalizeGoalPercentValues(values), makeActive }
     const parsed = createGoalSchema.safeParse(payload)
     if (!parsed.success) {
       toast.error(parsed.error.issues.map((i) => i.message).join(" "))
@@ -1044,7 +1070,13 @@ function CreateGoalDialog({
                   <FormItem>
                     <FormLabel>Withdrawal rate (%)</FormLabel>
                     <FormControl>
-                      <Input type="number" step="0.01" min={0.1} max={50} {...field} />
+                      <PercentInput
+                        min={0.1}
+                        max={50}
+                        {...field}
+                        onValueChange={field.onChange}
+                        onBlur={field.onBlur}
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -1063,14 +1095,14 @@ function CreateGoalDialog({
                       </InfoTooltip>
                     </div>
                     <FormControl>
-                      <Input
-                        type="number"
-                        step="0.01"
+                      <PercentInput
                         min={0}
                         max={100}
-                        placeholder="40"
+                        placeholder="40.0"
                         {...field}
                         value={typeof field.value === "number" || typeof field.value === "string" ? field.value : ""}
+                        onValueChange={field.onChange}
+                        onBlur={field.onBlur}
                       />
                     </FormControl>
                     <FormMessage />

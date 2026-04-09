@@ -38,6 +38,10 @@ import {
   updateLiabilitySchema,
   updateStrategySchema,
 } from "@/lib/validations/portfolio"
+import {
+  isGrowthTypeAllowedForCategory,
+  type AssetCategory,
+} from "@/lib/portfolio/asset-category"
 import { dashboardRoutes } from "@/lib/routes"
 
 function rev() {
@@ -48,14 +52,21 @@ function rev() {
 function isUniqueSecuredAssetError(e: unknown): boolean {
   const chain: unknown[] = [e]
   let cur: unknown = e
-  for (let i = 0; i < 5 && cur && typeof cur === "object" && "cause" in cur; i++) {
+  for (
+    let i = 0;
+    i < 5 && cur && typeof cur === "object" && "cause" in cur;
+    i++
+  ) {
     cur = (cur as { cause: unknown }).cause
     chain.push(cur)
   }
   for (const err of chain) {
     if (!err || typeof err !== "object") continue
     const o = err as { code?: string; constraint?: string }
-    if (o.code === "23505" && /liabilities_secured/i.test(String(o.constraint ?? ""))) {
+    if (
+      o.code === "23505" &&
+      /liabilities_secured/i.test(String(o.constraint ?? ""))
+    ) {
       return true
     }
   }
@@ -65,7 +76,11 @@ function isUniqueSecuredAssetError(e: unknown): boolean {
 function isLockTimeoutError(e: unknown): boolean {
   const chain: unknown[] = [e]
   let cur: unknown = e
-  for (let i = 0; i < 5 && cur && typeof cur === "object" && "cause" in cur; i++) {
+  for (
+    let i = 0;
+    i < 5 && cur && typeof cur === "object" && "cause" in cur;
+    i++
+  ) {
     cur = (cur as { cause: unknown }).cause
     chain.push(cur)
   }
@@ -73,7 +88,10 @@ function isLockTimeoutError(e: unknown): boolean {
     if (!err || typeof err !== "object") continue
     const o = err as { code?: string; message?: string }
     if (o.code === "55P03") return true
-    if (typeof o.message === "string" && /lock timeout|lock not available/i.test(o.message)) {
+    if (
+      typeof o.message === "string" &&
+      /lock timeout|lock not available/i.test(o.message)
+    ) {
       return true
     }
   }
@@ -88,7 +106,12 @@ function sumConvertedRecordAmounts(args: {
   const { rows, reportingCurrency, rates } = args
   let total = 0
   for (const row of rows) {
-    const converted = convertAmount(Number(row.amount), row.currency ?? "USD", reportingCurrency, rates)
+    const converted = convertAmount(
+      Number(row.amount),
+      row.currency ?? "USD",
+      reportingCurrency,
+      rates
+    )
     if (converted == null) return null
     total += converted
   }
@@ -116,9 +139,7 @@ function normalizeDeleteInput(input: string | { id: string; force?: boolean }) {
   return typeof input === "string" ? { id: input, force: false } : input
 }
 
-async function ensureInternalDebtCategory(
-  tx: AppTx,
-): Promise<string> {
+async function ensureInternalDebtCategory(tx: AppTx): Promise<string> {
   const [existing] = await tx
     .select({ id: expenseCategories.id })
     .from(expenseCategories)
@@ -142,7 +163,7 @@ async function ensureInternalDebtCategory(
 
 async function createLinkedDebtPaymentLine(
   tx: AppTx,
-  input: { liabilityId: string; liabilityName: string; currency: string },
+  input: { liabilityId: string; liabilityName: string; currency: string }
 ) {
   const categoryId = await ensureInternalDebtCategory(tx)
   await tx.insert(expenseLines).values({
@@ -157,7 +178,7 @@ async function createLinkedDebtPaymentLine(
 
 async function insertAllocationRowsAndUpdateBalances(
   tx: AppTx,
-  rows: AllocationInsertRow[],
+  rows: AllocationInsertRow[]
 ) {
   if (rows.length === 0) return
   await tx.insert(allocationRecords).values(rows)
@@ -174,7 +195,7 @@ async function insertAllocationRowsAndUpdateBalances(
 
 function toDbAsset(v: {
   name: string
-  assetCategory: (typeof assets.$inferInsert)["assetCategory"]
+  assetCategory: AssetCategory
   includeInFiProjection: boolean
   currency: string
   growthType: "compound" | "capital"
@@ -184,6 +205,10 @@ function toDbAsset(v: {
   currentBalance: number
   meta?: Parameters<typeof normalizeAssetMetaForDb>[0]
 }) {
+  if (!isGrowthTypeAllowedForCategory(v.assetCategory, v.growthType)) {
+    throw new Error("Real estate assets must use annual growth.")
+  }
+
   const assumedAnnualReturn =
     v.growthType === "compound" && v.assumedAnnualReturnPercent != null
       ? (v.assumedAnnualReturnPercent / 100).toFixed(6)
@@ -210,12 +235,16 @@ function toDbAsset(v: {
   }
 }
 
-export async function createAsset(input: unknown): Promise<ActionResult<{ id: string }>> {
+export async function createAsset(
+  input: unknown
+): Promise<ActionResult<{ id: string }>> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
   const parsed = createAssetSchema.safeParse(input)
   if (!parsed.success) {
-    return err(parsed.error.issues.map((i: { message: string }) => i.message).join(" "))
+    return err(
+      parsed.error.issues.map((i: { message: string }) => i.message).join(" ")
+    )
   }
   const { securedLiability, ...assetInput } = parsed.data
   const row = toDbAsset(assetInput)
@@ -232,14 +261,14 @@ export async function createAsset(input: unknown): Promise<ActionResult<{ id: st
         const [liabilityRow] = await tx
           .insert(liabilities)
           .values({
-          name: securedLiability.name,
-          liabilityType: securedLiability.liabilityType?.trim() || null,
-          trackingMode: securedLiability.trackingMode,
-          currency: securedLiability.currency,
-          currentBalance: securedLiability.currentBalance.toFixed(2),
-          securedByAssetId: a.id,
-          createdAt: new Date(),
-          updatedAt: new Date(),
+            name: securedLiability.name,
+            liabilityType: securedLiability.liabilityType?.trim() || null,
+            trackingMode: securedLiability.trackingMode,
+            currency: securedLiability.currency,
+            currentBalance: securedLiability.currentBalance.toFixed(2),
+            securedByAssetId: a.id,
+            createdAt: new Date(),
+            updatedAt: new Date(),
           })
           .returning({ id: liabilities.id })
         if (securedLiability.autoCreateBudgetCategory) {
@@ -270,7 +299,9 @@ export async function updateAsset(input: unknown): Promise<ActionResult> {
   if (!db) return err("Database not configured (set DATABASE_URL).")
   const parsed = updateAssetSchema.safeParse(input)
   if (!parsed.success) {
-    return err(parsed.error.issues.map((i: { message: string }) => i.message).join(" "))
+    return err(
+      parsed.error.issues.map((i: { message: string }) => i.message).join(" ")
+    )
   }
   const { id, securedLiability, ...rest } = parsed.data
   const row = toDbAsset(rest)
@@ -322,7 +353,7 @@ export async function updateAsset(input: unknown): Promise<ActionResult> {
 }
 
 export async function deleteAsset(
-  input: string | { id: string; force?: boolean },
+  input: string | { id: string; force?: boolean }
 ): Promise<ActionResult<DeleteConfirmationData>> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
@@ -347,24 +378,31 @@ export async function deleteAsset(
 }
 
 function normalizeSecuredByAssetId(
-  id: string | undefined | null,
+  id: string | undefined | null
 ): string | null {
   if (id == null) return null
   const t = id.trim()
   return t === "" ? null : t
 }
 
-export async function createLiability(input: unknown): Promise<ActionResult<{ id: string }>> {
+export async function createLiability(
+  input: unknown
+): Promise<ActionResult<{ id: string }>> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
   const parsed = createLiabilitySchema.safeParse(input)
   if (!parsed.success) {
-    return err(parsed.error.issues.map((i: { message: string }) => i.message).join(" "))
+    return err(
+      parsed.error.issues.map((i: { message: string }) => i.message).join(" ")
+    )
   }
   const v = parsed.data
   const securedByAssetId = normalizeSecuredByAssetId(v.securedByAssetId)
   if (securedByAssetId) {
-    const [a] = await db.select({ id: assets.id }).from(assets).where(eq(assets.id, securedByAssetId))
+    const [a] = await db
+      .select({ id: assets.id })
+      .from(assets)
+      .where(eq(assets.id, securedByAssetId))
     if (!a) return err("Secured asset not found.")
   }
   try {
@@ -409,12 +447,17 @@ export async function updateLiability(input: unknown): Promise<ActionResult> {
   if (!db) return err("Database not configured (set DATABASE_URL).")
   const parsed = updateLiabilitySchema.safeParse(input)
   if (!parsed.success) {
-    return err(parsed.error.issues.map((i: { message: string }) => i.message).join(" "))
+    return err(
+      parsed.error.issues.map((i: { message: string }) => i.message).join(" ")
+    )
   }
   const { id, ...rest } = parsed.data
   const securedByAssetId = normalizeSecuredByAssetId(rest.securedByAssetId)
   if (securedByAssetId) {
-    const [a] = await db.select({ id: assets.id }).from(assets).where(eq(assets.id, securedByAssetId))
+    const [a] = await db
+      .select({ id: assets.id })
+      .from(assets)
+      .where(eq(assets.id, securedByAssetId))
     if (!a) return err("Secured asset not found.")
   }
   try {
@@ -440,14 +483,16 @@ export async function updateLiability(input: unknown): Promise<ActionResult> {
       return err("Another liability is already linked to that asset.")
     }
     if (isLockTimeoutError(e)) {
-      return err("This liability is currently locked by another request. Please wait a few seconds and try again.")
+      return err(
+        "This liability is currently locked by another request. Please wait a few seconds and try again."
+      )
     }
     throw e
   }
 }
 
 export async function deleteLiability(
-  input: string | { id: string; force?: boolean },
+  input: string | { id: string; force?: boolean }
 ): Promise<ActionResult<DeleteConfirmationData>> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
@@ -471,12 +516,16 @@ export async function deleteLiability(
   return ok()
 }
 
-export async function createStrategy(input: unknown): Promise<ActionResult<{ id: string }>> {
+export async function createStrategy(
+  input: unknown
+): Promise<ActionResult<{ id: string }>> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
   const parsed = createStrategySchema.safeParse(input)
   if (!parsed.success) {
-    return err(parsed.error.issues.map((i: { message: string }) => i.message).join(" "))
+    return err(
+      parsed.error.issues.map((i: { message: string }) => i.message).join(" ")
+    )
   }
   const v = parsed.data
   if (v.makeActive) {
@@ -500,7 +549,9 @@ export async function updateStrategy(input: unknown): Promise<ActionResult> {
   if (!db) return err("Database not configured (set DATABASE_URL).")
   const parsed = updateStrategySchema.safeParse(input)
   if (!parsed.success) {
-    return err(parsed.error.issues.map((i: { message: string }) => i.message).join(" "))
+    return err(
+      parsed.error.issues.map((i: { message: string }) => i.message).join(" ")
+    )
   }
   const v = parsed.data
   await db
@@ -531,12 +582,16 @@ export async function setActiveStrategy(id: string): Promise<ActionResult> {
   return ok()
 }
 
-export async function upsertAllocationTarget(input: unknown): Promise<ActionResult> {
+export async function upsertAllocationTarget(
+  input: unknown
+): Promise<ActionResult> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
   const parsed = allocationTargetSchema.safeParse(input)
   if (!parsed.success) {
-    return err(parsed.error.issues.map((i: { message: string }) => i.message).join(" "))
+    return err(
+      parsed.error.issues.map((i: { message: string }) => i.message).join(" ")
+    )
   }
   const v = parsed.data
   const [a] = await db
@@ -545,7 +600,9 @@ export async function upsertAllocationTarget(input: unknown): Promise<ActionResu
     .where(eq(assets.id, v.assetId))
   if (!a) return err("Asset not found.")
   if (!a.includeInFiProjection) {
-    return err("Only assets included in your FI plan can have allocation targets.")
+    return err(
+      "Only assets included in your FI plan can have allocation targets."
+    )
   }
   const w = v.weightPercent.toFixed(3)
   await db
@@ -563,7 +620,9 @@ export async function upsertAllocationTarget(input: unknown): Promise<ActionResu
   return ok()
 }
 
-export async function deleteAllocationTarget(id: string): Promise<ActionResult> {
+export async function deleteAllocationTarget(
+  id: string
+): Promise<ActionResult> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
   await db.delete(allocationTargets).where(eq(allocationTargets.id, id))
@@ -572,13 +631,15 @@ export async function deleteAllocationTarget(id: string): Promise<ActionResult> 
 }
 
 export async function createAllocationRecord(
-  input: unknown,
+  input: unknown
 ): Promise<ActionResult<{ id: string }>> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
   const parsed = createAllocationRecordSchema.safeParse(input)
   if (!parsed.success) {
-    return err(parsed.error.issues.map((i: { message: string }) => i.message).join(" "))
+    return err(
+      parsed.error.issues.map((i: { message: string }) => i.message).join(" ")
+    )
   }
   const v = parsed.data
   const [assetRow] = await db
@@ -601,7 +662,11 @@ export async function createAllocationRecord(
     const created = await tx
       .insert(allocationRecords)
       .values(rowsToInsert)
-      .returning({ id: allocationRecords.id, assetId: allocationRecords.assetId, amount: allocationRecords.amount })
+      .returning({
+        id: allocationRecords.id,
+        assetId: allocationRecords.assetId,
+        amount: allocationRecords.amount,
+      })
     for (const createdRow of created) {
       await tx
         .update(assets)
@@ -618,7 +683,9 @@ export async function createAllocationRecord(
   return ok({ id: row.id })
 }
 
-export async function deleteAllocationRecord(id: string): Promise<ActionResult> {
+export async function deleteAllocationRecord(
+  id: string
+): Promise<ActionResult> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
   const deleted = await db.transaction(async (tx) => {
@@ -655,14 +722,16 @@ export async function deleteAllocationRecord(id: string): Promise<ActionResult> 
  * weight changes to the strategy.
  */
 export async function allocateInvestablePerStrategy(
-  input: unknown,
+  input: unknown
 ): Promise<ActionResult<{ created: number }>> {
   const db = getDb()
   if (!db) return err("Database not configured (set DATABASE_URL).")
 
   const parsed = allocateInvestableFromBudgetSchema.safeParse(input)
   if (!parsed.success) {
-    return err(parsed.error.issues.map((i: { message: string }) => i.message).join(" "))
+    return err(
+      parsed.error.issues.map((i: { message: string }) => i.message).join(" ")
+    )
   }
 
   const { yearMonth, summaryCurrency, weights: weightsOverride } = parsed.data
@@ -672,31 +741,48 @@ export async function allocateInvestablePerStrategy(
   }
   const { start, end: allocatedOn } = utcMonthBoundsForCalendarMonth(
     ymParts.year,
-    ymParts.monthIndex0,
+    ymParts.monthIndex0
   )
 
-  const [activeGoalRows, incomeRows, expenseRows, fx, stratRows] = await Promise.all([
-    db
-      .select({ currency: goals.currency })
-      .from(goals)
-      .where(eq(goals.isActive, true))
-      .orderBy(desc(goals.updatedAt))
-      .limit(1),
-    db
-      .select({ amount: incomeRecords.amount, currency: incomeRecords.currency })
-      .from(incomeRecords)
-      .where(and(gte(incomeRecords.occurredOn, start), lte(incomeRecords.occurredOn, allocatedOn))),
-    db
-      .select({ amount: expenseRecords.amount, currency: expenseRecords.currency })
-      .from(expenseRecords)
-      .where(and(gte(expenseRecords.occurredOn, start), lte(expenseRecords.occurredOn, allocatedOn))),
-    loadRatesOnOrBefore(db, utcIsoDateString(new Date())),
-    db
-      .select()
-      .from(allocationStrategies)
-      .where(eq(allocationStrategies.isActive, true))
-      .limit(1),
-  ])
+  const [activeGoalRows, incomeRows, expenseRows, fx, stratRows] =
+    await Promise.all([
+      db
+        .select({ currency: goals.currency })
+        .from(goals)
+        .where(eq(goals.isActive, true))
+        .orderBy(desc(goals.updatedAt))
+        .limit(1),
+      db
+        .select({
+          amount: incomeRecords.amount,
+          currency: incomeRecords.currency,
+        })
+        .from(incomeRecords)
+        .where(
+          and(
+            gte(incomeRecords.occurredOn, start),
+            lte(incomeRecords.occurredOn, allocatedOn)
+          )
+        ),
+      db
+        .select({
+          amount: expenseRecords.amount,
+          currency: expenseRecords.currency,
+        })
+        .from(expenseRecords)
+        .where(
+          and(
+            gte(expenseRecords.occurredOn, start),
+            lte(expenseRecords.occurredOn, allocatedOn)
+          )
+        ),
+      loadRatesOnOrBefore(db, utcIsoDateString(new Date())),
+      db
+        .select()
+        .from(allocationStrategies)
+        .where(eq(allocationStrategies.isActive, true))
+        .limit(1),
+    ])
 
   const reportingCurrency = resolveBudgetSummaryCurrency(summaryCurrency)
 
@@ -744,17 +830,21 @@ export async function allocateInvestablePerStrategy(
     .where(
       and(
         eq(allocationTargets.strategyId, strat.id),
-        eq(assets.includeInFiProjection, true),
-      ),
+        eq(assets.includeInFiProjection, true)
+      )
     )
 
   if (targets.length === 0) {
     return err(
-      "Active strategy has no allocation targets on FI-plan assets. Add targets or mark assets for FI.",
+      "Active strategy has no allocation targets on FI-plan assets. Add targets or mark assets for FI."
     )
   }
 
-  type SplitRow = { assetId: string; weightPercent: number; currency: string | null }
+  type SplitRow = {
+    assetId: string
+    weightPercent: number
+    currency: string | null
+  }
   let splitTargets: SplitRow[]
 
   if (weightsOverride != null && weightsOverride.length > 0) {
@@ -762,7 +852,9 @@ export async function allocateInvestablePerStrategy(
       return err("Send one weight per strategy target asset.")
     }
     const targetIds = new Set(targets.map((t) => t.assetId))
-    const byAsset = new Map(weightsOverride.map((w) => [w.assetId, w.weightPercent] as const))
+    const byAsset = new Map(
+      weightsOverride.map((w) => [w.assetId, w.weightPercent] as const)
+    )
     if (byAsset.size !== weightsOverride.length) {
       return err("Duplicate asset in weights.")
     }
@@ -773,7 +865,9 @@ export async function allocateInvestablePerStrategy(
     }
     for (const w of weightsOverride) {
       if (!targetIds.has(w.assetId)) {
-        return err("Weights include an asset that is not in the active strategy.")
+        return err(
+          "Weights include an asset that is not in the active strategy."
+        )
       }
     }
     splitTargets = targets.map((t) => ({
@@ -795,7 +889,9 @@ export async function allocateInvestablePerStrategy(
   }
 
   const n = splitTargets.length
-  const rawShares = splitTargets.map((t) => investable * (t.weightPercent / sumW))
+  const rawShares = splitTargets.map(
+    (t) => investable * (t.weightPercent / sumW)
+  )
   const cents = rawShares.map((x) => Math.round(x * 100))
   const targetCents = Math.round(investable * 100)
   const drift = targetCents - cents.reduce((a, b) => a + b, 0)
@@ -807,10 +903,15 @@ export async function allocateInvestablePerStrategy(
       const shareReporting = sharesReporting[i]!
       if (shareReporting <= 0) return []
       const assetCcy = target.currency ?? "USD"
-      const inAsset = convertAmount(shareReporting, reportingCurrency, assetCcy, fx.rates)
+      const inAsset = convertAmount(
+        shareReporting,
+        reportingCurrency,
+        assetCcy,
+        fx.rates
+      )
       if (inAsset == null) {
         throw new Error(
-          `Could not convert ${reportingCurrency} to ${assetCcy} for an asset. Check FX pairs.`,
+          `Could not convert ${reportingCurrency} to ${assetCcy} for an asset. Check FX pairs.`
         )
       }
       const amt = Math.round(inAsset * 100) / 100
@@ -837,13 +938,13 @@ export async function allocateInvestablePerStrategy(
         and(
           gte(allocationRecords.allocatedOn, start),
           lte(allocationRecords.allocatedOn, allocatedOn),
-          inArray(allocationRecords.assetId, targetAssetIds),
-        ),
+          inArray(allocationRecords.assetId, targetAssetIds)
+        )
       )
       .limit(1)
     if (existingThisMonth.length > 0) {
       return err(
-        "This month already has allocation records for one or more target assets. Delete the existing records first, or adjust balances manually.",
+        "This month already has allocation records for one or more target assets. Delete the existing records first, or adjust balances manually."
       )
     }
 

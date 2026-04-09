@@ -3,9 +3,10 @@
 import { zodResolver } from "@hookform/resolvers/zod"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { Fragment, useEffect, useId, useMemo, useState } from "react"
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react"
 import {
   useForm,
+  useWatch,
   type Control,
   type FieldValues,
   type Resolver,
@@ -46,7 +47,13 @@ import {
   ASSET_CATEGORY_GROUP_HEADINGS,
   ASSET_CATEGORY_LABELS,
   ASSET_CATEGORY_VALUES,
+  allowedGrowthTypesForCategory,
+  defaultGrowthType,
   defaultIncludeInFi,
+  growthTypeLabel,
+  isGrowthTypeAllowedForCategory,
+  isRealEstateAssetCategory,
+  type AssetGrowthType,
   type AssetCategory,
 } from "@/lib/portfolio/asset-category"
 import { parseAssetMeta } from "@/lib/types/asset-meta"
@@ -72,12 +79,18 @@ import {
 import {
   Form,
   FormControl,
+  FormDescription,
   FormField,
   FormItem,
   FormLabel,
   FormMessage,
 } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
+import {
+  DecimalMoneyInput,
+  IntegerInput,
+  PercentInput,
+} from "@/components/ui/numeric-input"
 import {
   Select,
   SelectContent,
@@ -154,6 +167,26 @@ const ASSET_TABLE_CATEGORY_ORDER: AssetCategory[] = [
   "other",
 ]
 
+function assetValueLabel(category: unknown): string {
+  return isRealEstateAssetCategory(category)
+    ? "Current market value"
+    : "Current value"
+}
+
+function assetValueDescription(category: unknown): string {
+  if (isRealEstateAssetCategory(category)) {
+    return "Enter the property's gross market value or your claim's current resale value. Do not enter only the booking fee or equity paid in. Loans stay under Liabilities."
+  }
+  return "Enter the asset's current gross value in its native currency. Liabilities are tracked separately."
+}
+
+function roundToSingleDecimal(
+  value: number | null | undefined
+): number | undefined {
+  if (value == null || !Number.isFinite(value)) return undefined
+  return Math.round(value * 10) / 10
+}
+
 const portfolioTabTriggerCn =
   "relative inline-flex h-[calc(100%-1px)] flex-1 items-center justify-center gap-1.5 rounded-md border border-transparent px-1.5 py-0.5 text-sm font-medium whitespace-nowrap transition-all focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
 
@@ -167,7 +200,7 @@ function PortfolioSummaryCurrencySwitch({
   const router = useRouter()
   return (
     <div
-      className="bg-muted/40 inline-flex rounded-lg border p-0.5"
+      className="inline-flex rounded-lg border bg-muted/40 p-0.5"
       role="group"
       aria-label="Reporting currency for portfolio totals"
     >
@@ -222,7 +255,9 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
       const list = by.get(cat)
       if (list) list.push(a)
     }
-    return ASSET_TABLE_CATEGORY_ORDER.filter((c) => (by.get(c)?.length ?? 0) > 0).map((c) => ({
+    return ASSET_TABLE_CATEGORY_ORDER.filter(
+      (c) => (by.get(c)?.length ?? 0) > 0
+    ).map((c) => ({
       category: c,
       items: by.get(c) ?? [],
     }))
@@ -230,20 +265,26 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
 
   const targetSum = useMemo(
     () => targets.reduce((s, t) => s + Number(t.weightPercent), 0),
-    [targets],
+    [targets]
   )
 
   const [mainTab, setMainTab] = useState("assets")
-  const [pendingDeleteAsset, setPendingDeleteAsset] = useState<PendingDeleteState | null>(null)
-  const [pendingDeleteStrategy, setPendingDeleteStrategy] = useState<string | null>(null)
+  const [pendingDeleteAsset, setPendingDeleteAsset] =
+    useState<PendingDeleteState | null>(null)
+  const [pendingDeleteStrategy, setPendingDeleteStrategy] = useState<
+    string | null
+  >(null)
   const [assetToEdit, setAssetToEdit] = useState<AssetRow | null>(null)
   const [assetForRecords, setAssetForRecords] = useState<AssetRow | null>(null)
   const [strategyToRename, setStrategyToRename] = useState<{
     id: string
     name: string
   } | null>(null)
-  const [liabilityToEdit, setLiabilityToEdit] = useState<LiabilityRow | null>(null)
-  const [pendingDeleteLiability, setPendingDeleteLiability] = useState<PendingDeleteState | null>(null)
+  const [liabilityToEdit, setLiabilityToEdit] = useState<LiabilityRow | null>(
+    null
+  )
+  const [pendingDeleteLiability, setPendingDeleteLiability] =
+    useState<PendingDeleteState | null>(null)
 
   const reportingCcy = goalReportingCurrency ?? summaryCurrency
   const tabBaseId = useId()
@@ -285,7 +326,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                   portfolioTabTriggerCn,
                   mainTab === "assets"
                     ? "bg-background text-foreground shadow-sm dark:border-input dark:bg-input/30 dark:text-foreground"
-                    : "text-foreground/60 hover:text-foreground dark:text-muted-foreground dark:hover:text-foreground",
+                    : "text-foreground/60 hover:text-foreground dark:text-muted-foreground dark:hover:text-foreground"
                 )}
               >
                 Assets
@@ -303,7 +344,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                   portfolioTabTriggerCn,
                   mainTab === "liabilities"
                     ? "bg-background text-foreground shadow-sm dark:border-input dark:bg-input/30 dark:text-foreground"
-                    : "text-foreground/60 hover:text-foreground dark:text-muted-foreground dark:hover:text-foreground",
+                    : "text-foreground/60 hover:text-foreground dark:text-muted-foreground dark:hover:text-foreground"
                 )}
               >
                 Liabilities
@@ -321,7 +362,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                   portfolioTabTriggerCn,
                   mainTab === "strategy"
                     ? "bg-background text-foreground shadow-sm dark:border-input dark:bg-input/30 dark:text-foreground"
-                    : "text-foreground/60 hover:text-foreground dark:text-muted-foreground dark:hover:text-foreground",
+                    : "text-foreground/60 hover:text-foreground dark:text-muted-foreground dark:hover:text-foreground"
                 )}
               >
                 Strategy
@@ -332,18 +373,22 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                 summaryCurrency={summaryCurrency}
                 summaryCurrencyOptions={summaryCurrencyOptions}
               />
-              {mainTab === "assets" ? <AddAssetDialog onSaved={refresh} /> : null}
+              {mainTab === "assets" ? (
+                <AddAssetDialog onSaved={refresh} />
+              ) : null}
               {mainTab === "liabilities" ? (
                 <AddLiabilityDialog assets={assets} onSaved={refresh} />
               ) : null}
-              {mainTab === "strategy" ? <StrategyCreateDialog onCreated={refresh} /> : null}
+              {mainTab === "strategy" ? (
+                <StrategyCreateDialog onCreated={refresh} />
+              ) : null}
             </div>
           </div>
         }
       />
 
       {portfolioFxWarning ? (
-        <p className="text-muted-foreground border-border bg-muted/40 rounded-lg border px-3 py-2 text-sm">
+        <p className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
           {portfolioFxWarning}
         </p>
       ) : null}
@@ -351,13 +396,16 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
       <div className="flex flex-col gap-6">
         <div className="grid w-full min-w-0 grid-cols-2 gap-3 md:grid-cols-4">
           <Card className="min-w-0">
-            <CardHeader className="gap-0 pb-1 pt-3">
-              <CardTitle className="text-sm font-medium leading-tight">Total invested</CardTitle>
-              <p className="text-muted-foreground line-clamp-2 text-[11px] leading-snug">
-                Allocation records{goalReportingCurrency ? ` · ${goalReportingCurrency}` : ""}
+            <CardHeader className="gap-0 pt-3 pb-1">
+              <CardTitle className="text-sm leading-tight font-medium">
+                Total invested
+              </CardTitle>
+              <p className="line-clamp-2 text-[11px] leading-snug text-muted-foreground">
+                Allocation records
+                {goalReportingCurrency ? ` · ${goalReportingCurrency}` : ""}
               </p>
             </CardHeader>
-            <CardContent className="pb-3 pt-0">
+            <CardContent className="pt-0 pb-3">
               <p className="font-heading text-lg font-semibold tabular-nums sm:text-xl md:text-2xl">
                 {totalInvestedReporting != null
                   ? formatCurrency(totalInvestedReporting, reportingCcy)
@@ -366,13 +414,15 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
             </CardContent>
           </Card>
           <Card className="min-w-0">
-            <CardHeader className="gap-0 pb-1 pt-3">
-              <CardTitle className="text-sm font-medium leading-tight">Gross position</CardTitle>
-              <p className="text-muted-foreground line-clamp-2 text-[11px] leading-snug">
+            <CardHeader className="gap-0 pt-3 pb-1">
+              <CardTitle className="text-sm leading-tight font-medium">
+                Gross position
+              </CardTitle>
+              <p className="line-clamp-2 text-[11px] leading-snug text-muted-foreground">
                 Assets only · {summaryCurrency}
               </p>
             </CardHeader>
-            <CardContent className="pb-3 pt-0">
+            <CardContent className="pt-0 pb-3">
               <p className="font-heading text-lg font-semibold tabular-nums sm:text-xl md:text-2xl">
                 {currentPositionReporting != null
                   ? formatCurrency(currentPositionReporting, reportingCcy)
@@ -381,13 +431,15 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
             </CardContent>
           </Card>
           <Card className="min-w-0">
-            <CardHeader className="gap-0 pb-1 pt-3">
-              <CardTitle className="text-sm font-medium leading-tight">Total liabilities</CardTitle>
-              <p className="text-muted-foreground line-clamp-2 text-[11px] leading-snug">
+            <CardHeader className="gap-0 pt-3 pb-1">
+              <CardTitle className="text-sm leading-tight font-medium">
+                Total liabilities
+              </CardTitle>
+              <p className="line-clamp-2 text-[11px] leading-snug text-muted-foreground">
                 Remaining owed
               </p>
             </CardHeader>
-            <CardContent className="pb-3 pt-0">
+            <CardContent className="pt-0 pb-3">
               <p className="font-heading text-lg font-semibold tabular-nums sm:text-xl md:text-2xl">
                 {totalLiabilitiesReporting != null
                   ? formatCurrency(totalLiabilitiesReporting, reportingCcy)
@@ -396,13 +448,15 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
             </CardContent>
           </Card>
           <Card className="min-w-0">
-            <CardHeader className="gap-0 pb-1 pt-3">
-              <CardTitle className="text-sm font-medium leading-tight">Net position</CardTitle>
-              <p className="text-muted-foreground line-clamp-2 text-[11px] leading-snug">
+            <CardHeader className="gap-0 pt-3 pb-1">
+              <CardTitle className="text-sm leading-tight font-medium">
+                Net position
+              </CardTitle>
+              <p className="line-clamp-2 text-[11px] leading-snug text-muted-foreground">
                 Assets − liabilities
               </p>
             </CardHeader>
-            <CardContent className="pb-3 pt-0">
+            <CardContent className="pt-0 pb-3">
               <p className="font-heading text-lg font-semibold tabular-nums sm:text-xl md:text-2xl">
                 {netPositionReporting != null
                   ? formatCurrency(netPositionReporting, reportingCcy)
@@ -415,17 +469,25 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
         <Card>
           <CardHeader className="pb-2">
             <CardHeaderTitleRow
-              title={<CardTitle className="text-base font-medium">Projected total by year</CardTitle>}
+              title={
+                <CardTitle className="text-base font-medium">
+                  Projected total by year
+                </CardTitle>
+              }
               info={
                 <>
                   <p>
-                    FI-scoped path: assets marked &quot;in FI plan&quot; plus monthly investable, minus
-                    projected liabilities. Full balance-sheet net worth is in the cards above and on FI
+                    FI-scoped path: assets marked &quot;in FI plan&quot; plus
+                    monthly investable, minus projected liabilities. Full
+                    balance-sheet net worth is in the cards above and on FI
                     Summary.
                   </p>
                   {(fiDateLabel || fxAsOfDate) && (
-                    <p className="text-muted-foreground mt-2">
-                      {[fiDateLabel ? `FI ${fiDateLabel}` : null, fxAsOfDate ? `FX ${fxAsOfDate}` : null]
+                    <p className="mt-2 text-muted-foreground">
+                      {[
+                        fiDateLabel ? `FI ${fiDateLabel}` : null,
+                        fxAsOfDate ? `FX ${fxAsOfDate}` : null,
+                      ]
                         .filter(Boolean)
                         .join(" · ")}
                     </p>
@@ -454,7 +516,9 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
       >
         <EditAssetDialog
           asset={assetToEdit}
-          secured={assetToEdit ? securedLiabilityByAssetId[assetToEdit.id] : undefined}
+          secured={
+            assetToEdit ? securedLiabilityByAssetId[assetToEdit.id] : undefined
+          }
           open={!!assetToEdit}
           onOpenChange={(o) => {
             if (!o) setAssetToEdit(null)
@@ -479,28 +543,31 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
           <CardHeader>
             <CardHeaderTitleRow
               title={<CardTitle>Assets</CardTitle>}
-              info="Rows are grouped by category (set when you edit an asset). “In FI plan” includes the asset in FI Summary and strategy targets. Growth: compound (annual %) vs capital (terminal value + date). Secured loans are edited on the asset; reconcile by updating balance."
+              info="Rows are grouped by category. Included shows whether the asset feeds FI Summary and strategy projections. Snapshot shows the asset's annual growth or future revaluation model. Current value is the gross asset value before liabilities. For real estate, use market or claim value; equity is implied after debts."
             />
           </CardHeader>
           <CardContent>
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead className="text-center" title="In FI plan (Summary + strategy)">
-                    FI
+                  <TableHead className="w-[36%]">Asset</TableHead>
+                  <TableHead>Snapshot</TableHead>
+                  <TableHead
+                    className="w-[18%] text-right"
+                    title="Gross current asset value before liabilities. For real estate, use market or claim value."
+                  >
+                    Current value
                   </TableHead>
-                  <TableHead>CCY</TableHead>
-                  <TableHead>Growth</TableHead>
-                  <TableHead className="text-right">Allocated</TableHead>
-                  <TableHead className="text-right">Balance</TableHead>
                   <TableHead className="w-12" />
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {assets.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="text-muted-foreground h-20 text-center">
+                    <TableCell
+                      colSpan={4}
+                      className="h-20 text-center text-muted-foreground"
+                    >
                       No assets yet.
                     </TableCell>
                   </TableRow>
@@ -509,31 +576,39 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                     <Fragment key={category}>
                       <TableRow className="bg-muted/30 hover:bg-muted/30">
                         <TableCell
-                          colSpan={7}
-                          className="text-muted-foreground py-2 text-xs font-semibold"
+                          colSpan={4}
+                          className="py-2 text-xs font-semibold text-muted-foreground"
                         >
                           {ASSET_CATEGORY_GROUP_HEADINGS[category]}
                         </TableCell>
                       </TableRow>
                       {items.map((a) => {
                         const recs = allocationRecordsByAssetId[a.id] ?? []
-                        const recentRecs = recs.slice(0, 3)
-                        const allocated = recs.reduce((s, r) => s + Number(r.amount), 0)
+                        const allocated = recs.reduce(
+                          (s, r) => s + Number(r.amount),
+                          0
+                        )
                         const link = parseAssetMeta(a.meta).linkToManage
+                        const externalLabel =
+                          link?.label && link.label !== a.name
+                            ? link.label
+                            : null
                         return (
                           <TableRow key={a.id}>
-                            <TableCell className="font-medium">
+                            <TableCell className="min-w-0 py-3 align-top font-medium whitespace-normal">
                               <div
                                 className="flex items-center gap-1.5"
                                 title={link?.credentialsHint || undefined}
                               >
-                                <span>{a.name}</span>
+                                <span className="min-w-0 truncate">
+                                  {a.name}
+                                </span>
                                 {link?.url ? (
                                   <a
                                     href={link.url}
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    className="text-muted-foreground hover:text-foreground inline-flex shrink-0"
+                                    className="inline-flex shrink-0 text-muted-foreground hover:text-foreground"
                                     aria-label={
                                       link.label
                                         ? `Open ${link.label}`
@@ -545,54 +620,76 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                                   </a>
                                 ) : null}
                               </div>
-                              {link?.label && !link.url ? (
-                                <div className="text-muted-foreground mt-0.5 max-w-[16rem] truncate text-[11px]">
-                                  {link.label}
-                                </div>
-                              ) : null}
-                              {recentRecs.length > 0 ? (
-                                <div className="text-muted-foreground mt-1 space-y-0.5 text-[11px]">
-                                  {recentRecs.map((record) => (
-                                    <div key={record.id}>
-                                      {record.allocatedOn} ·{" "}
-                                      {formatCurrency(Number(record.amount), a.currency ?? "USD")}
-                                    </div>
-                                  ))}
+                              {externalLabel ? (
+                                <div className="mt-0.5 max-w-[16rem] truncate text-[11px] text-muted-foreground">
+                                  {externalLabel}
                                 </div>
                               ) : null}
                             </TableCell>
-                            <TableCell className="text-center">
-                              <span
-                                className={cn(
-                                  "inline-block min-w-[1.25rem] text-xs font-medium tabular-nums",
-                                  a.includeInFiProjection ? "text-foreground" : "text-muted-foreground",
-                                )}
-                                title={
-                                  a.includeInFiProjection
-                                    ? "In FI plan (Summary + strategy)"
-                                    : "Out of FI plan"
-                                }
-                              >
-                                {a.includeInFiProjection ? "Y" : "—"}
-                              </span>
+                            <TableCell className="py-3 align-top whitespace-normal">
+                              <div className="flex flex-wrap items-center gap-2 text-xs">
+                                <span
+                                  className={cn(
+                                    "inline-flex items-center rounded-full border px-2 py-0.5 font-medium",
+                                    a.includeInFiProjection
+                                      ? "border-transparent bg-foreground text-background"
+                                      : "border-border bg-muted text-muted-foreground"
+                                  )}
+                                  title={
+                                    a.includeInFiProjection
+                                      ? "Included in projections"
+                                      : "Excluded from projections"
+                                  }
+                                >
+                                  {a.includeInFiProjection
+                                    ? "Included"
+                                    : "Excluded"}
+                                </span>
+                                <span className="inline-flex items-center rounded-full border px-2 py-0.5 font-mono text-muted-foreground">
+                                  {a.currency ?? "USD"}
+                                </span>
+                                <span className="inline-flex items-center rounded-full border px-2 py-0.5 text-muted-foreground">
+                                  {growthTypeLabel(a.growthType)}
+                                </span>
+                                <span className="inline-flex items-center rounded-full border px-2 py-0.5 text-muted-foreground tabular-nums">
+                                  Allocated{" "}
+                                  {formatCurrency(
+                                    allocated,
+                                    a.currency ?? "USD"
+                                  )}
+                                </span>
+                              </div>
                             </TableCell>
-                            <TableCell className="font-mono text-xs">{a.currency ?? "USD"}</TableCell>
-                            <TableCell className="text-muted-foreground text-xs">
-                              {a.growthType === "compound" ? "Comp." : "Cap."}
+                            <TableCell
+                              className="py-3 text-right align-top tabular-nums"
+                              title={
+                                isRealEstateAssetCategory(a.assetCategory)
+                                  ? "Gross property or claim value before loans"
+                                  : "Current gross asset value"
+                              }
+                            >
+                              <div className="flex items-center justify-end gap-2">
+                                <span>
+                                  {formatCurrency(
+                                    Number(a.currentBalance),
+                                    a.currency ?? "USD"
+                                  )}
+                                </span>
+                                {isRealEstateAssetCategory(a.assetCategory) ? (
+                                  <span className="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground">
+                                    Gross
+                                  </span>
+                                ) : null}
+                              </div>
                             </TableCell>
-                            <TableCell className="text-right tabular-nums">
-                              {formatCurrency(allocated, a.currency ?? "USD")}
-                            </TableCell>
-                            <TableCell className="text-right tabular-nums">
-                              {formatCurrency(
-                                Number(a.currentBalance),
-                                a.currency ?? "USD",
-                              )}
-                            </TableCell>
-                            <TableCell>
+                            <TableCell className="py-3 align-top">
                               <DropdownMenu>
                                 <DropdownMenuTrigger asChild>
-                                  <Button variant="ghost" size="icon-sm" aria-label="Actions">
+                                  <Button
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    aria-label="Actions"
+                                  >
                                     <MoreHorizontal />
                                   </Button>
                                 </DropdownMenuTrigger>
@@ -686,7 +783,10 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
               <TableBody>
                 {liabilities.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="text-muted-foreground h-20 text-center">
+                    <TableCell
+                      colSpan={6}
+                      className="h-20 text-center text-muted-foreground"
+                    >
                       No liabilities yet.
                     </TableCell>
                   </TableRow>
@@ -701,7 +801,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                               "inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium",
                               row.hasDebtPaymentLine
                                 ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                                : "bg-amber-500/10 text-amber-700 dark:text-amber-400",
+                                : "bg-amber-500/10 text-amber-700 dark:text-amber-400"
                             )}
                           >
                             {row.hasDebtPaymentLine
@@ -710,20 +810,29 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                           </span>
                         </div>
                       </TableCell>
-                      <TableCell className="text-muted-foreground text-sm">
+                      <TableCell className="text-sm text-muted-foreground">
                         {row.liabilityType ?? "—"}
                       </TableCell>
-                      <TableCell className="font-mono text-xs">{row.currency ?? "USD"}</TableCell>
-                      <TableCell className="text-right tabular-nums">
-                        {formatCurrency(Number(row.currentBalance), row.currency ?? "USD")}
+                      <TableCell className="font-mono text-xs">
+                        {row.currency ?? "USD"}
                       </TableCell>
-                      <TableCell className="text-muted-foreground text-sm">
+                      <TableCell className="text-right tabular-nums">
+                        {formatCurrency(
+                          Number(row.currentBalance),
+                          row.currency ?? "USD"
+                        )}
+                      </TableCell>
+                      <TableCell className="text-sm text-muted-foreground">
                         {row.securedByAssetName ?? "—"}
                       </TableCell>
                       <TableCell>
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon-sm" aria-label="Actions">
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              aria-label="Actions"
+                            >
                               <MoreHorizontal />
                             </Button>
                           </DropdownMenuTrigger>
@@ -796,12 +905,12 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                   ? `Active strategy: ${allocationHealthSummary.strategyName}`
                   : "No active strategy"}
               </p>
-              <p className="text-muted-foreground text-sm">
+              <p className="text-sm text-muted-foreground">
                 {allocationHealthSummary.strategyName
                   ? `${allocationHealthSummary.targetCount} target${allocationHealthSummary.targetCount === 1 ? "" : "s"} · weights ${allocationHealthSummary.weightSum.toFixed(1)}%`
                   : "Set up a strategy here before allocating in Cash Flow."}
               </p>
-              <p className="text-muted-foreground text-sm">
+              <p className="text-sm text-muted-foreground">
                 {allocationHealthSummary.lastAllocatedOn
                   ? `Last allocated: ${allocationHealthSummary.lastAllocatedOn}`
                   : "No allocation history yet."}
@@ -810,7 +919,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
             <div className="flex flex-wrap items-center gap-2 text-sm">
               <Link
                 href={dashboardRoutes.cashFlow}
-                className="text-primary font-medium underline-offset-4 hover:underline"
+                className="font-medium text-primary underline-offset-4 hover:underline"
               >
                 Allocate in Cash Flow
               </Link>
@@ -841,7 +950,10 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
               <TableBody>
                 {strategies.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={3} className="text-muted-foreground h-16 text-center">
+                    <TableCell
+                      colSpan={3}
+                      className="h-16 text-center text-muted-foreground"
+                    >
                       No strategies yet.
                     </TableCell>
                   </TableRow>
@@ -849,11 +961,17 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                   strategies.map((s) => (
                     <TableRow key={s.id}>
                       <TableCell>{s.name}</TableCell>
-                      <TableCell>{s.isActive ? "Active" : "Inactive"}</TableCell>
+                      <TableCell>
+                        {s.isActive ? "Active" : "Inactive"}
+                      </TableCell>
                       <TableCell>
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon-sm" aria-label="Actions">
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              aria-label="Actions"
+                            >
                               <MoreHorizontal />
                             </Button>
                           </DropdownMenuTrigger>
@@ -905,14 +1023,16 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
         <Card>
           <CardHeader className="space-y-2">
             <CardHeaderTitleRow
-              title={<CardTitle>Allocation targets (active strategy)</CardTitle>}
+              title={
+                <CardTitle>Allocation targets (active strategy)</CardTitle>
+              }
               info="Weights should sum to 100% for full deployment of investable capital."
             />
             <p
               className={
                 targetSum !== 100
-                  ? "text-destructive text-sm font-medium tabular-nums"
-                  : "text-muted-foreground text-sm tabular-nums"
+                  ? "text-sm font-medium text-destructive tabular-nums"
+                  : "text-sm text-muted-foreground tabular-nums"
               }
             >
               Sum: {targetSum.toFixed(1)}%
@@ -938,7 +1058,10 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                   <TableBody>
                     {targets.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={3} className="text-muted-foreground h-16 text-center">
+                        <TableCell
+                          colSpan={3}
+                          className="h-16 text-center text-muted-foreground"
+                        >
                           No targets yet.
                         </TableCell>
                       </TableRow>
@@ -972,9 +1095,11 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
                 </Table>
               </>
             ) : (
-              <div className="text-muted-foreground flex items-center gap-1.5 text-sm">
+              <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
                 <span>No active strategy</span>
-                <InfoTooltip>Activate a strategy to edit allocation targets.</InfoTooltip>
+                <InfoTooltip>
+                  Activate a strategy to edit allocation targets.
+                </InfoTooltip>
               </div>
             )}
           </CardContent>
@@ -999,13 +1124,13 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              className="text-destructive-foreground bg-destructive hover:bg-destructive/90"
               onClick={async () => {
                 if (!pendingDeleteAsset) return
                 const r = await deleteAsset(
                   pendingDeleteAsset.requiresConfirmation
                     ? { id: pendingDeleteAsset.id, force: true }
-                    : pendingDeleteAsset.id,
+                    : pendingDeleteAsset.id
                 )
                 if (r.ok && r.data?.requiresConfirmation) {
                   setPendingDeleteAsset({
@@ -1044,7 +1169,7 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              className="text-destructive-foreground bg-destructive hover:bg-destructive/90"
               onClick={async () => {
                 if (!pendingDeleteStrategy) return
                 const r = await deleteStrategy(pendingDeleteStrategy)
@@ -1079,13 +1204,13 @@ export function PortfolioManager({ data }: { data: PortfolioPayload }) {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              className="text-destructive-foreground bg-destructive hover:bg-destructive/90"
               onClick={async () => {
                 if (!pendingDeleteLiability) return
                 const r = await deleteLiability(
                   pendingDeleteLiability.requiresConfirmation
                     ? { id: pendingDeleteLiability.id, force: true }
-                    : pendingDeleteLiability.id,
+                    : pendingDeleteLiability.id
                 )
                 if (r.ok && r.data?.requiresConfirmation) {
                   setPendingDeleteLiability({
@@ -1119,7 +1244,7 @@ function PortfolioYearlyBarChart({
   currencyCode: string
 }) {
   if (data.length === 0) {
-    return <p className="text-muted-foreground text-sm">—</p>
+    return <p className="text-sm text-muted-foreground">—</p>
   }
 
   const chartData = data.map((d) => ({
@@ -1128,10 +1253,17 @@ function PortfolioYearlyBarChart({
   }))
 
   return (
-    <div className="text-foreground h-[280px] w-full sm:h-[300px]">
+    <div className="h-[280px] w-full text-foreground sm:h-[300px]">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={chartData} margin={{ top: 8, right: 12, left: 4, bottom: 8 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+        <BarChart
+          data={chartData}
+          margin={{ top: 8, right: 12, left: 4, bottom: 8 }}
+        >
+          <CartesianGrid
+            strokeDasharray="3 3"
+            stroke="var(--border)"
+            vertical={false}
+          />
           <XAxis
             dataKey="year"
             tick={{ fontSize: 11 }}
@@ -1143,7 +1275,9 @@ function PortfolioYearlyBarChart({
             tickLine={false}
             axisLine={false}
             tickFormatter={(v) =>
-              v >= 1_000_000 ? `${Math.round(v / 1_000_000)}M` : `${Math.round(v / 1000)}k`
+              v >= 1_000_000
+                ? `${Math.round(v / 1_000_000)}M`
+                : `${Math.round(v / 1000)}k`
             }
           />
           <Tooltip
@@ -1156,7 +1290,7 @@ function PortfolioYearlyBarChart({
               formatCurrency(
                 typeof value === "number" ? value : Number(value),
                 currencyCode,
-                { maximumFractionDigits: 0 },
+                { maximumFractionDigits: 0 }
               ),
               "Projected",
             ]}
@@ -1180,7 +1314,8 @@ function liabilityToFormValues(row: LiabilityRow): UpdateLiabilityInput {
     name: row.name,
     liabilityType: row.liabilityType ?? "",
     currency: (row.currency ?? "USD") as UpdateLiabilityInput["currency"],
-    trackingMode: (row.trackingMode ?? "fixed_installment") as UpdateLiabilityInput["trackingMode"],
+    trackingMode: (row.trackingMode ??
+      "fixed_installment") as UpdateLiabilityInput["trackingMode"],
     currentBalance: Number(row.currentBalance),
     securedByAssetId: row.securedByAssetId ?? "",
     autoCreateBudgetCategory: false,
@@ -1218,7 +1353,11 @@ function LiabilityFormFields({
           <FormItem>
             <FormLabel>Type</FormLabel>
             <FormControl>
-              <Input placeholder="Mortgage, margin, loan…" {...field} value={field.value ?? ""} />
+              <Input
+                placeholder="Mortgage, margin, loan…"
+                {...field}
+                value={field.value ?? ""}
+              />
             </FormControl>
             <FormMessage />
           </FormItem>
@@ -1255,7 +1394,7 @@ function LiabilityFormFields({
           <FormItem>
             <FormLabel>Amount still owed</FormLabel>
             <FormControl>
-              <Input type="number" step="1" min={0} {...field} />
+              <IntegerInput min={0} {...field} onValueChange={field.onChange} />
             </FormControl>
             <FormMessage />
           </FormItem>
@@ -1276,7 +1415,9 @@ function LiabilityFormFields({
               <SelectContent>
                 {LIABILITY_TRACKING_MODES.map((mode) => (
                   <SelectItem key={mode} value={mode}>
-                    {mode === "fixed_installment" ? "Fixed installment" : "Revolving"}
+                    {mode === "fixed_installment"
+                      ? "Fixed installment"
+                      : "Revolving"}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -1293,7 +1434,9 @@ function LiabilityFormFields({
             <FormLabel>Secured by asset</FormLabel>
             <Select
               onValueChange={(v) => field.onChange(v === "__none__" ? "" : v)}
-              value={field.value && field.value !== "" ? field.value : "__none__"}
+              value={
+                field.value && field.value !== "" ? field.value : "__none__"
+              }
             >
               <FormControl>
                 <SelectTrigger>
@@ -1328,9 +1471,12 @@ function LiabilityFormFields({
                 />
               </FormControl>
               <div className="space-y-1">
-                <FormLabel className="font-normal">Create debt payment line</FormLabel>
-                <p className="text-muted-foreground text-xs">
-                  Creates a linked debt payment line in Cash Flow using this liability name.
+                <FormLabel className="font-normal">
+                  Create debt payment line
+                </FormLabel>
+                <p className="text-xs text-muted-foreground">
+                  Creates a linked debt payment line in Cash Flow using this
+                  liability name.
                 </p>
               </div>
             </FormItem>
@@ -1390,13 +1536,24 @@ function AddLiabilityDialog({
       </DialogTrigger>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
         <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
-          <DialogTitle className="min-w-0 flex-1 pr-8">New liability</DialogTitle>
-          <Button type="submit" form="portfolio-liability-create" size="sm" className="shrink-0">
+          <DialogTitle className="min-w-0 flex-1 pr-8">
+            New liability
+          </DialogTitle>
+          <Button
+            type="submit"
+            form="portfolio-liability-create"
+            size="sm"
+            className="shrink-0"
+          >
             Create
           </Button>
         </DialogHeader>
         <Form {...form}>
-          <form id="portfolio-liability-create" onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
+          <form
+            id="portfolio-liability-create"
+            onSubmit={form.handleSubmit(onSubmit)}
+            className="space-y-3"
+          >
             <LiabilityFormFields
               control={form.control as unknown as Control<FieldValues>}
               assets={assets}
@@ -1448,13 +1605,24 @@ function EditLiabilityDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
         <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
-          <DialogTitle className="min-w-0 flex-1 pr-8">Edit liability</DialogTitle>
-          <Button type="submit" form="portfolio-liability-edit" size="sm" className="shrink-0">
+          <DialogTitle className="min-w-0 flex-1 pr-8">
+            Edit liability
+          </DialogTitle>
+          <Button
+            type="submit"
+            form="portfolio-liability-edit"
+            size="sm"
+            className="shrink-0"
+          >
             Save
           </Button>
         </DialogHeader>
         <Form {...form}>
-          <form id="portfolio-liability-edit" onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
+          <form
+            id="portfolio-liability-edit"
+            onSubmit={form.handleSubmit(onSubmit)}
+            className="space-y-3"
+          >
             <input type="hidden" {...form.register("id")} />
             <LiabilityFormFields
               control={form.control as unknown as Control<FieldValues>}
@@ -1467,7 +1635,10 @@ function EditLiabilityDialog({
   )
 }
 
-function assetToFormValues(asset: AssetRow, secured: SecuredRow | undefined): UpdateAssetInput {
+function assetToFormValues(
+  asset: AssetRow,
+  secured: SecuredRow | undefined
+): UpdateAssetInput {
   const m = parseAssetMeta(asset.meta)
   return {
     id: asset.id,
@@ -1477,7 +1648,7 @@ function assetToFormValues(asset: AssetRow, secured: SecuredRow | undefined): Up
     currency: (asset.currency ?? "USD") as UpdateAssetInput["currency"],
     growthType: asset.growthType,
     assumedAnnualReturnPercent: asset.assumedAnnualReturn
-      ? Number(asset.assumedAnnualReturn) * 100
+      ? roundToSingleDecimal(Number(asset.assumedAnnualReturn) * 100)
       : undefined,
     assumedTerminalValue: asset.assumedTerminalValue
       ? Number(asset.assumedTerminalValue)
@@ -1496,7 +1667,9 @@ function assetToFormValues(asset: AssetRow, secured: SecuredRow | undefined): Up
           name: secured.name,
           liabilityType: secured.liabilityType ?? "",
           currency: secured.currency as UpdateAssetInput["currency"],
-          trackingMode: secured.trackingMode as "fixed_installment" | "revolving",
+          trackingMode: secured.trackingMode as
+            | "fixed_installment"
+            | "revolving",
           currentBalance: Number(secured.currentBalance),
           autoCreateBudgetCategory: false,
         }
@@ -1559,7 +1732,8 @@ function AllocationRecordsDialog({
           <div className="flex min-w-0 flex-1 items-center gap-1.5 pr-8">
             <DialogTitle>Allocation records — {asset.name}</DialogTitle>
             <InfoTooltip>
-              Log capital you move into this asset (contributions). Amounts are in the asset’s currency.
+              Log capital you move into this asset (contributions). Amounts are
+              in the asset’s currency.
             </InfoTooltip>
           </div>
           <Button
@@ -1573,9 +1747,9 @@ function AllocationRecordsDialog({
           </Button>
         </DialogHeader>
         {!asset.includeInFiProjection ? (
-          <p className="text-muted-foreground text-xs">
-            This asset is not in your FI plan — allocation records cannot be added (remove old rows if
-            needed).
+          <p className="text-xs text-muted-foreground">
+            This asset is not in your FI plan — allocation records cannot be
+            added (remove old rows if needed).
           </p>
         ) : null}
         <Table>
@@ -1589,14 +1763,19 @@ function AllocationRecordsDialog({
           <TableBody>
             {records.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={3} className="text-muted-foreground h-14 text-center">
+                <TableCell
+                  colSpan={3}
+                  className="h-14 text-center text-muted-foreground"
+                >
                   No records.
                 </TableCell>
               </TableRow>
             ) : (
               records.map((r) => (
                 <TableRow key={r.id}>
-                  <TableCell className="font-mono text-xs">{r.allocatedOn}</TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {r.allocatedOn}
+                  </TableCell>
                   <TableCell className="text-right tabular-nums">
                     {formatCurrency(Number(r.amount), ccy)}
                   </TableCell>
@@ -1635,7 +1814,11 @@ function AllocationRecordsDialog({
                 <FormItem className="min-w-[100px] flex-1">
                   <FormLabel>Amount</FormLabel>
                   <FormControl>
-                    <Input type="number" step="0.01" min={0} {...field} />
+                    <DecimalMoneyInput
+                      min={0}
+                      {...field}
+                      onValueChange={field.onChange}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -1684,12 +1867,34 @@ function AddAssetDialog({ onSaved }: { onSaved: () => void }) {
   })
   const growthType = form.watch("growthType")
   const assetCategory = form.watch("assetCategory")
+  const previousAssetCategoryRef = useRef<AssetCategory>(
+    createAssetFormDefaults.assetCategory
+  )
 
   useEffect(() => {
     if (!customizeFi) {
-      form.setValue("includeInFiProjection", defaultIncludeInFi(assetCategory as AssetCategory))
+      form.setValue(
+        "includeInFiProjection",
+        defaultIncludeInFi(assetCategory as AssetCategory)
+      )
     }
   }, [assetCategory, customizeFi, form])
+
+  useEffect(() => {
+    const nextCategory = assetCategory as AssetCategory
+    const prevCategory = previousAssetCategoryRef.current
+    const currentGrowthType = form.getValues("growthType") as AssetGrowthType
+    const prevDefault = defaultGrowthType(prevCategory)
+
+    if (
+      !isGrowthTypeAllowedForCategory(nextCategory, currentGrowthType) ||
+      currentGrowthType === prevDefault
+    ) {
+      form.setValue("growthType", defaultGrowthType(nextCategory))
+    }
+
+    previousAssetCategoryRef.current = nextCategory
+  }, [assetCategory, form])
 
   useEffect(() => {
     if (loanLinked) {
@@ -1717,6 +1922,9 @@ function AddAssetDialog({ onSaved }: { onSaved: () => void }) {
     }
     const payload: CreateAssetForm = {
       ...values,
+      assumedAnnualReturnPercent: roundToSingleDecimal(
+        values.assumedAnnualReturnPercent
+      ),
       securedLiability:
         loanLinked && values.securedLiability?.name?.trim()
           ? values.securedLiability
@@ -1729,6 +1937,7 @@ function AddAssetDialog({ onSaved }: { onSaved: () => void }) {
       setLoanLinked(false)
       setCustomizeFi(false)
       form.reset(createAssetFormDefaults)
+      previousAssetCategoryRef.current = createAssetFormDefaults.assetCategory
       onSaved()
     } else toast.error(r.error)
   }
@@ -1741,29 +1950,46 @@ function AddAssetDialog({ onSaved }: { onSaved: () => void }) {
           Add asset
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
-        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
-          <div className="flex min-w-0 flex-1 items-center gap-1.5 pr-8">
+      <DialogContent
+        fullViewport
+        className="inset-4 max-h-[calc(100dvh-2rem)] sm:inset-6 sm:max-h-[calc(100dvh-3rem)]"
+      >
+        <DialogHeader className="flex shrink-0 flex-row flex-wrap items-center justify-between gap-2 space-y-0 border-b border-border px-6 py-4 pr-14">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
             <DialogTitle>New asset</DialogTitle>
-            <InfoTooltip>Category sets defaults; FI inclusion controls Summary and strategy targets.</InfoTooltip>
+            <InfoTooltip>
+              Category sets FI inclusion defaults and the recommended growth
+              model. Real estate always uses annual appreciation.
+            </InfoTooltip>
           </div>
-          <Button type="submit" form="portfolio-asset-create" size="sm" className="shrink-0">
+          <Button
+            type="submit"
+            form="portfolio-asset-create"
+            size="sm"
+            className="shrink-0"
+          >
             Create
           </Button>
         </DialogHeader>
-        <Form {...form}>
-          <form id="portfolio-asset-create" onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
-            <AssetFormFields
-              control={form.control as unknown as Control<FieldValues>}
-              growthType={growthType}
-              variant="create"
-              loanLinked={loanLinked}
-              setLoanLinked={setLoanLinked}
-              customizeFi={customizeFi}
-              setCustomizeFi={setCustomizeFi}
-            />
-          </form>
-        </Form>
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+          <Form {...form}>
+            <form
+              id="portfolio-asset-create"
+              onSubmit={form.handleSubmit(onSubmit)}
+              className="space-y-4"
+            >
+              <AssetFormFields
+                control={form.control as unknown as Control<FieldValues>}
+                growthType={growthType}
+                variant="create"
+                loanLinked={loanLinked}
+                setLoanLinked={setLoanLinked}
+                customizeFi={customizeFi}
+                setCustomizeFi={setCustomizeFi}
+              />
+            </form>
+          </Form>
+        </div>
       </DialogContent>
     </Dialog>
   )
@@ -1788,13 +2014,36 @@ function EditAssetDialog({
     defaultValues: asset ? assetToFormValues(asset, secured) : undefined,
   })
   const growthType = form.watch("growthType")
+  const assetCategory = form.watch("assetCategory")
+  const previousAssetCategoryRef = useRef<AssetCategory>(
+    asset?.assetCategory ?? "investment"
+  )
 
   useEffect(() => {
     if (asset && open) {
       setLoanLinked(!!secured)
       form.reset(assetToFormValues(asset, secured))
+      previousAssetCategoryRef.current = asset.assetCategory
     }
   }, [asset, secured, open, form])
+
+  useEffect(() => {
+    if (!asset || !open) return
+
+    const nextCategory = assetCategory as AssetCategory
+    const prevCategory = previousAssetCategoryRef.current
+    const currentGrowthType = form.getValues("growthType") as AssetGrowthType
+    const prevDefault = defaultGrowthType(prevCategory)
+
+    if (
+      !isGrowthTypeAllowedForCategory(nextCategory, currentGrowthType) ||
+      currentGrowthType === prevDefault
+    ) {
+      form.setValue("growthType", defaultGrowthType(nextCategory))
+    }
+
+    previousAssetCategoryRef.current = nextCategory
+  }, [asset, open, assetCategory, form])
 
   useEffect(() => {
     if (!asset || !open) return
@@ -1833,7 +2082,13 @@ function EditAssetDialog({
     } else {
       securedLiability = undefined
     }
-    const r = await updateAsset({ ...values, securedLiability })
+    const r = await updateAsset({
+      ...values,
+      assumedAnnualReturnPercent: roundToSingleDecimal(
+        values.assumedAnnualReturnPercent
+      ),
+      securedLiability,
+    })
     if (r.ok) {
       toast.success("Asset updated")
       onOpenChange(false)
@@ -1845,30 +2100,48 @@ function EditAssetDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
-        <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
-          <div className="flex min-w-0 flex-1 items-center gap-1.5 pr-8">
+      <DialogContent
+        fullViewport
+        className="inset-4 max-h-[calc(100dvh-2rem)] sm:inset-6 sm:max-h-[calc(100dvh-3rem)]"
+      >
+        <DialogHeader className="flex shrink-0 flex-row flex-wrap items-center justify-between gap-2 space-y-0 border-b border-border px-6 py-4 pr-14">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
             <DialogTitle>Edit asset</DialogTitle>
-            <InfoTooltip>FI inclusion and linked loans update Net Worth and Cash Flow behavior.</InfoTooltip>
+            <InfoTooltip>
+              FI inclusion and linked loans affect projections separately. Real
+              estate uses annual appreciation, while future revaluation remains
+              for special non-property cases.
+            </InfoTooltip>
           </div>
-          <Button type="submit" form="portfolio-asset-edit" size="sm" className="shrink-0">
+          <Button
+            type="submit"
+            form="portfolio-asset-edit"
+            size="sm"
+            className="shrink-0"
+          >
             Save
           </Button>
         </DialogHeader>
-        <Form {...form}>
-          <form id="portfolio-asset-edit" onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
-            <input type="hidden" {...form.register("id")} />
-            <AssetFormFields
-              control={form.control as unknown as Control<FieldValues>}
-              growthType={growthType}
-              variant="edit"
-              loanLinked={loanLinked}
-              setLoanLinked={setLoanLinked}
-              customizeFi={false}
-              setCustomizeFi={() => {}}
-            />
-          </form>
-        </Form>
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+          <Form {...form}>
+            <form
+              id="portfolio-asset-edit"
+              onSubmit={form.handleSubmit(onSubmit)}
+              className="space-y-4"
+            >
+              <input type="hidden" {...form.register("id")} />
+              <AssetFormFields
+                control={form.control as unknown as Control<FieldValues>}
+                growthType={growthType}
+                variant="edit"
+                loanLinked={loanLinked}
+                setLoanLinked={setLoanLinked}
+                customizeFi={false}
+                setCustomizeFi={() => {}}
+              />
+            </form>
+          </Form>
+        </div>
       </DialogContent>
     </Dialog>
   )
@@ -1884,13 +2157,21 @@ function AssetFormFields({
   setCustomizeFi,
 }: {
   control: Control<FieldValues>
-  growthType: "compound" | "capital"
+  growthType: AssetGrowthType
   variant: "create" | "edit"
   loanLinked: boolean
   setLoanLinked: (v: boolean) => void
   customizeFi: boolean
   setCustomizeFi: (v: boolean) => void
 }) {
+  const assetCategory = useWatch({ control, name: "assetCategory" })
+  const selectedCategory =
+    (assetCategory as AssetCategory | undefined) ?? "investment"
+  const allowedGrowthTypes = allowedGrowthTypesForCategory(selectedCategory)
+  const growthMetricLabel = isRealEstateAssetCategory(selectedCategory)
+    ? "Annual appreciation (%)"
+    : "Annual growth (%)"
+
   return (
     <>
       <FormField
@@ -1938,8 +2219,9 @@ function AssetFormFields({
             checked={customizeFi}
             onChange={(e) => setCustomizeFi(e.target.checked)}
           />
-          <span className="text-muted-foreground leading-snug">
-            Customize “in FI plan” (stop syncing from category when you change category)
+          <span className="leading-snug text-muted-foreground">
+            Customize “in FI plan” (stop syncing from category when you change
+            category)
           </span>
         </label>
       ) : null}
@@ -1957,10 +2239,12 @@ function AssetFormFields({
               />
             </FormControl>
             <div className="space-y-1">
-              <FormLabel className="font-normal">Include in FI plan &amp; strategy targets</FormLabel>
-              <p className="text-muted-foreground text-xs">
-                When off, the asset still counts toward net worth but is excluded from Summary
-                projections and allocation weights.
+              <FormLabel className="font-normal">
+                Include in FI plan &amp; strategy targets
+              </FormLabel>
+              <p className="text-xs text-muted-foreground">
+                When off, the asset still counts toward net worth but is
+                excluded from Summary projections and allocation weights.
               </p>
             </div>
           </FormItem>
@@ -2003,10 +2287,23 @@ function AssetFormFields({
                 </SelectTrigger>
               </FormControl>
               <SelectContent>
-                <SelectItem value="compound">Compound</SelectItem>
-                <SelectItem value="capital">Capital (maturity)</SelectItem>
+                {allowedGrowthTypes.includes("compound") ? (
+                  <SelectItem value="compound">
+                    {growthTypeLabel("compound")}
+                  </SelectItem>
+                ) : null}
+                {allowedGrowthTypes.includes("capital") ? (
+                  <SelectItem value="capital">
+                    {growthTypeLabel("capital")}
+                  </SelectItem>
+                ) : null}
               </SelectContent>
             </Select>
+            <FormDescription>
+              {isRealEstateAssetCategory(selectedCategory)
+                ? "Real estate projects with annual appreciation. Future revaluation is reserved for special non-property cases."
+                : "Use annual growth for ongoing appreciation or return assumptions. Use future revaluation for one-off repricing or exit scenarios."}
+            </FormDescription>
             <FormMessage />
           </FormItem>
         )}
@@ -2017,10 +2314,21 @@ function AssetFormFields({
           name="assumedAnnualReturnPercent"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Assumed annual return (%)</FormLabel>
+              <FormLabel>{growthMetricLabel}</FormLabel>
               <FormControl>
-                <Input type="number" step="0.01" {...field} />
+                <PercentInput
+                  min={0}
+                  max={100}
+                  {...field}
+                  onValueChange={field.onChange}
+                  onBlur={field.onBlur}
+                />
               </FormControl>
+              <FormDescription>
+                {isRealEstateAssetCategory(selectedCategory)
+                  ? "Used to project property appreciation from the current market value."
+                  : "Used to project ongoing growth from the current value. Rounded to one decimal place."}
+              </FormDescription>
               <FormMessage />
             </FormItem>
           )}
@@ -2033,10 +2341,19 @@ function AssetFormFields({
             name="assumedTerminalValue"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Terminal value</FormLabel>
+                <FormLabel>Projected value</FormLabel>
                 <FormControl>
-                  <Input type="number" step="1" {...field} value={field.value ?? ""} />
+                  <IntegerInput
+                    min={0}
+                    {...field}
+                    value={field.value ?? ""}
+                    onValueChange={field.onChange}
+                  />
                 </FormControl>
+                <FormDescription>
+                  Use when you expect a discrete revaluation, exit, or resale
+                  value at a future date.
+                </FormDescription>
                 <FormMessage />
               </FormItem>
             )}
@@ -2046,7 +2363,7 @@ function AssetFormFields({
             name="maturationDate"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Maturation date</FormLabel>
+                <FormLabel>Revaluation date</FormLabel>
                 <FormControl>
                   <Input type="date" {...field} value={field.value ?? ""} />
                 </FormControl>
@@ -2061,10 +2378,13 @@ function AssetFormFields({
         name="currentBalance"
         render={({ field }) => (
           <FormItem>
-            <FormLabel>Current balance</FormLabel>
+            <FormLabel>{assetValueLabel(assetCategory)}</FormLabel>
             <FormControl>
-              <Input type="number" step="1" min={0} {...field} />
+              <IntegerInput min={0} {...field} onValueChange={field.onChange} />
             </FormControl>
+            <FormDescription>
+              {assetValueDescription(assetCategory)}
+            </FormDescription>
             <FormMessage />
           </FormItem>
         )}
@@ -2078,15 +2398,16 @@ function AssetFormFields({
             onChange={(e) => setLoanLinked(e.target.checked)}
           />
           <span>
-            <span className="font-medium">Linked loan</span>
-            <span className="text-muted-foreground block text-xs">
-              Optional. Creates or updates one liability secured by this asset. Unsecured loans stay
-              under Liabilities.
+            <span className="font-medium">Linked secured loan</span>
+            <span className="block text-xs text-muted-foreground">
+              Optional. Creates or updates one liability secured by this asset.
+              The asset value above stays gross; equity is implied after
+              liabilities. Additional loans can be tracked under Liabilities.
             </span>
           </span>
         </label>
         {loanLinked ? (
-          <div className="bg-muted/30 space-y-3 rounded-lg border p-3">
+          <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
             <FormField
               control={control}
               name="securedLiability.name"
@@ -2094,7 +2415,11 @@ function AssetFormFields({
                 <FormItem>
                   <FormLabel>Loan name</FormLabel>
                   <FormControl>
-                    <Input placeholder="e.g. Car loan" {...field} value={field.value ?? ""} />
+                    <Input
+                      placeholder="e.g. Car loan"
+                      {...field}
+                      value={field.value ?? ""}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -2107,7 +2432,11 @@ function AssetFormFields({
                 <FormItem>
                   <FormLabel>Loan type (optional)</FormLabel>
                   <FormControl>
-                    <Input placeholder="Auto, mortgage…" {...field} value={field.value ?? ""} />
+                    <Input
+                      placeholder="Auto, mortgage…"
+                      {...field}
+                      value={field.value ?? ""}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -2119,7 +2448,10 @@ function AssetFormFields({
               render={({ field }) => (
                 <FormItem>
                   <FormLabel>Loan currency</FormLabel>
-                  <Select onValueChange={field.onChange} value={field.value ?? "USD"}>
+                  <Select
+                    onValueChange={field.onChange}
+                    value={field.value ?? "USD"}
+                  >
                     <FormControl>
                       <SelectTrigger>
                         <SelectValue placeholder="CCY" />
@@ -2143,7 +2475,10 @@ function AssetFormFields({
               render={({ field }) => (
                 <FormItem>
                   <FormLabel>Loan tracking</FormLabel>
-                  <Select onValueChange={field.onChange} value={field.value ?? "fixed_installment"}>
+                  <Select
+                    onValueChange={field.onChange}
+                    value={field.value ?? "fixed_installment"}
+                  >
                     <FormControl>
                       <SelectTrigger>
                         <SelectValue />
@@ -2152,7 +2487,9 @@ function AssetFormFields({
                     <SelectContent>
                       {LIABILITY_TRACKING_MODES.map((mode) => (
                         <SelectItem key={mode} value={mode}>
-                          {mode === "fixed_installment" ? "Fixed installment" : "Revolving"}
+                          {mode === "fixed_installment"
+                            ? "Fixed installment"
+                            : "Revolving"}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -2168,7 +2505,12 @@ function AssetFormFields({
                 <FormItem>
                   <FormLabel>Amount still owed</FormLabel>
                   <FormControl>
-                    <Input type="number" step="1" min={0} {...field} value={field.value ?? ""} />
+                    <IntegerInput
+                      min={0}
+                      {...field}
+                      value={field.value ?? ""}
+                      onValueChange={field.onChange}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -2189,9 +2531,12 @@ function AssetFormFields({
                       />
                     </FormControl>
                     <div className="space-y-1">
-                      <FormLabel className="font-normal">Create debt payment line</FormLabel>
-                      <p className="text-muted-foreground text-xs">
-                        Creates a linked debt payment line in Cash Flow for this loan.
+                      <FormLabel className="font-normal">
+                        Create debt payment line
+                      </FormLabel>
+                      <p className="text-xs text-muted-foreground">
+                        Creates a linked debt payment line in Cash Flow for this
+                        loan.
                       </p>
                     </div>
                   </FormItem>
@@ -2202,12 +2547,12 @@ function AssetFormFields({
         ) : null}
       </div>
       <div className="space-y-3 border-t pt-3">
-        <p className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+        <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Link to manage
         </p>
-        <p className="text-muted-foreground text-xs">
-          Optional pointer to the broker or app and a credentials hint (stored in your database — use
-          references, not secrets).
+        <p className="text-xs text-muted-foreground">
+          Optional pointer to the broker or app and a credentials hint (stored
+          in your database — use references, not secrets).
         </p>
         <FormField
           control={control}
@@ -2216,7 +2561,11 @@ function AssetFormFields({
             <FormItem>
               <FormLabel>Platform label</FormLabel>
               <FormControl>
-                <Input placeholder="e.g. Interactive Brokers" {...field} value={field.value ?? ""} />
+                <Input
+                  placeholder="e.g. Interactive Brokers"
+                  {...field}
+                  value={field.value ?? ""}
+                />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -2253,7 +2602,7 @@ function AssetFormFields({
                   value={field.value ?? ""}
                   rows={3}
                   className={cn(
-                    "border-input bg-transparent placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 dark:bg-input/30 flex w-full rounded-lg border px-2.5 py-2 text-base transition-colors outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 md:text-sm",
+                    "flex w-full rounded-lg border border-input bg-transparent px-2.5 py-2 text-base transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 md:text-sm dark:bg-input/30"
                   )}
                 />
               </FormControl>
@@ -2301,13 +2650,24 @@ function StrategyCreateDialog({ onCreated }: { onCreated: () => void }) {
       </DialogTrigger>
       <DialogContent>
         <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
-          <DialogTitle className="min-w-0 flex-1 pr-8">New strategy</DialogTitle>
-          <Button type="submit" form="portfolio-strategy-create" size="sm" className="shrink-0">
+          <DialogTitle className="min-w-0 flex-1 pr-8">
+            New strategy
+          </DialogTitle>
+          <Button
+            type="submit"
+            form="portfolio-strategy-create"
+            size="sm"
+            className="shrink-0"
+          >
             Create
           </Button>
         </DialogHeader>
         <Form {...form}>
-          <form id="portfolio-strategy-create" onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
+          <form
+            id="portfolio-strategy-create"
+            onSubmit={form.handleSubmit(onSubmit)}
+            className="space-y-3"
+          >
             <FormField
               control={form.control}
               name="name"
@@ -2373,13 +2733,24 @@ function RenameStrategyDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
-          <DialogTitle className="min-w-0 flex-1 pr-8">Rename strategy</DialogTitle>
-          <Button type="submit" form="portfolio-strategy-rename" size="sm" className="shrink-0">
+          <DialogTitle className="min-w-0 flex-1 pr-8">
+            Rename strategy
+          </DialogTitle>
+          <Button
+            type="submit"
+            form="portfolio-strategy-rename"
+            size="sm"
+            className="shrink-0"
+          >
             Save
           </Button>
         </DialogHeader>
         <Form {...form}>
-          <form id="portfolio-strategy-rename" onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
+          <form
+            id="portfolio-strategy-rename"
+            onSubmit={form.handleSubmit(onSubmit)}
+            className="space-y-3"
+          >
             <FormField
               control={form.control}
               name="name"
@@ -2412,7 +2783,7 @@ function TargetAddForm({
   onAdded: () => void
 }) {
   const available = assets.filter(
-    (a) => !existingAssetIds.includes(a.id) && a.includeInFiProjection,
+    (a) => !existingAssetIds.includes(a.id) && a.includeInFiProjection
   )
 
   const form = useForm({
@@ -2429,20 +2800,29 @@ function TargetAddForm({
     assetId: string
     weightPercent: number
   }) {
-    const r = await upsertAllocationTarget(values)
+    const r = await upsertAllocationTarget({
+      ...values,
+      weightPercent:
+        roundToSingleDecimal(values.weightPercent) ?? values.weightPercent,
+    })
     if (r.ok) {
       toast.success("Target saved")
-      form.reset({ strategyId, assetId: available[0]?.id ?? "", weightPercent: 0 })
+      form.reset({
+        strategyId,
+        assetId: available[0]?.id ?? "",
+        weightPercent: 0,
+      })
       onAdded()
     } else toast.error(r.error)
   }
 
   if (available.length === 0) {
     return (
-      <div className="text-muted-foreground flex items-center gap-1.5 text-sm">
+      <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
         <span>—</span>
         <InfoTooltip>
-          All FI-plan assets already have a target, or add/mark assets for FI under Net Worth.
+          All FI-plan assets already have a target, or add/mark assets for FI
+          under Net Worth.
         </InfoTooltip>
       </div>
     )
@@ -2485,7 +2865,13 @@ function TargetAddForm({
             <FormItem className="w-full sm:w-28">
               <FormLabel>Weight %</FormLabel>
               <FormControl>
-                <Input type="number" step="0.1" min={0} max={100} {...field} />
+                <PercentInput
+                  min={0}
+                  max={100}
+                  {...field}
+                  onValueChange={field.onChange}
+                  onBlur={field.onBlur}
+                />
               </FormControl>
               <FormMessage />
             </FormItem>

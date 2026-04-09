@@ -2,10 +2,17 @@ import { z } from "zod"
 
 import { BUDGET_SUMMARY_CURRENCIES } from "@/lib/budget/summary-currency"
 import { supportedCurrencySchema } from "@/lib/currency/iso4217"
-import { assetCategorySchema } from "@/lib/portfolio/asset-category"
+import {
+  assetCategorySchema,
+  isGrowthTypeAllowedForCategory,
+  isRealEstateAssetCategory,
+} from "@/lib/portfolio/asset-category"
 
 const budgetSummaryCurrencySchema = z.enum(BUDGET_SUMMARY_CURRENCIES)
-export const LIABILITY_TRACKING_MODES = ["fixed_installment", "revolving"] as const
+export const LIABILITY_TRACKING_MODES = [
+  "fixed_installment",
+  "revolving",
+] as const
 const liabilityTrackingModeSchema = z.enum(LIABILITY_TRACKING_MODES)
 
 const dateOpt = z
@@ -59,13 +66,24 @@ const assetObject = z.object({
 
 function refineAssetGrowth(
   data: {
+    assetCategory: z.infer<typeof assetCategorySchema>
     growthType: "compound" | "capital"
     assumedAnnualReturnPercent?: number
     assumedTerminalValue?: number
     maturationDate?: string
   },
-  ctx: z.RefinementCtx,
+  ctx: z.RefinementCtx
 ) {
+  if (!isGrowthTypeAllowedForCategory(data.assetCategory, data.growthType)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: isRealEstateAssetCategory(data.assetCategory)
+        ? "Real estate assets must use annual growth."
+        : "This growth model is not available for the selected asset category.",
+      path: ["growthType"],
+    })
+  }
+
   if (data.growthType === "compound") {
     if (
       data.assumedAnnualReturnPercent == null ||
@@ -73,23 +91,26 @@ function refineAssetGrowth(
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Annual return (%) required for compound assets",
+        message: "Annual growth (%) required for annual-growth assets",
         path: ["assumedAnnualReturnPercent"],
       })
     }
   }
   if (data.growthType === "capital") {
-    if (data.assumedTerminalValue == null || Number.isNaN(data.assumedTerminalValue)) {
+    if (
+      data.assumedTerminalValue == null ||
+      Number.isNaN(data.assumedTerminalValue)
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Terminal value required for capital assets",
+        message: "Projected value required for future-revaluation assets",
         path: ["assumedTerminalValue"],
       })
     }
     if (!data.maturationDate) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Maturation date required for capital assets",
+        message: "Revaluation date required for future-revaluation assets",
         path: ["maturationDate"],
       })
     }
@@ -98,19 +119,18 @@ function refineAssetGrowth(
 
 export const createAssetSchema = assetObject.superRefine(refineAssetGrowth)
 
-const updateAssetObject = assetObject
-  .omit({ securedLiability: true })
-  .extend({
-    id: z.string().uuid(),
-    /**
-     * Omitted: leave linked loan unchanged.
-     * null: remove secured liability for this asset (if any).
-     * object: create or update the single secured liability.
-     */
-    securedLiability: securedLiabilityPayloadSchema.nullish(),
-  })
+const updateAssetObject = assetObject.omit({ securedLiability: true }).extend({
+  id: z.string().uuid(),
+  /**
+   * Omitted: leave linked loan unchanged.
+   * null: remove secured liability for this asset (if any).
+   * object: create or update the single secured liability.
+   */
+  securedLiability: securedLiabilityPayloadSchema.nullish(),
+})
 
-export const updateAssetSchema = updateAssetObject.superRefine(refineAssetGrowth)
+export const updateAssetSchema =
+  updateAssetObject.superRefine(refineAssetGrowth)
 
 export const strategyNameSchema = z.object({
   name: z.string().min(1).max(256),
@@ -133,9 +153,7 @@ export const allocationTargetSchema = z.object({
 export const createAllocationRecordSchema = z.object({
   assetId: z.string().uuid(),
   amount: z.coerce.number().positive("Amount must be greater than zero"),
-  allocatedOn: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD"),
+  allocatedOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD"),
 })
 
 const allocateInvestableWeightEntrySchema = z.object({
@@ -189,7 +207,7 @@ function trimOpt(s: string | undefined): string | undefined {
 
 /** Persistable JSON for `assets.meta` (drops empty linkToManage). */
 export function normalizeAssetMetaForDb(
-  meta: z.infer<typeof assetMetaSchema>,
+  meta: z.infer<typeof assetMetaSchema>
 ): Record<string, unknown> {
   if (!meta?.linkToManage) return {}
   const lm = meta.linkToManage

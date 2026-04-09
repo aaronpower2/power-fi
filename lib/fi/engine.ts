@@ -10,9 +10,10 @@ import type {
 /** Classic FIRE: annual spend / withdrawal rate (e.g. 4% rule). */
 export function requiredPrincipal(
   monthlyFunding: number,
-  withdrawalRate: number,
+  withdrawalRate: number
 ): number {
-  if (withdrawalRate <= 0 || !Number.isFinite(withdrawalRate)) return Number.POSITIVE_INFINITY
+  if (withdrawalRate <= 0 || !Number.isFinite(withdrawalRate))
+    return Number.POSITIVE_INFINITY
   return (monthlyFunding * 12) / withdrawalRate
 }
 
@@ -20,20 +21,26 @@ export function monthlyRateFromAnnual(annual: number): number {
   return (1 + annual) ** (1 / 12) - 1
 }
 
-export function calcBlendedReturn(assets: BlendedReturnAssetInput[]): number | null {
+export function calcBlendedReturn(
+  assets: BlendedReturnAssetInput[]
+): number | null {
   const included = assets.filter(
     (asset) =>
       asset.growthType === "compound" &&
       asset.assumedAnnualReturn != null &&
-      asset.currentBalance > 0,
+      asset.currentBalance > 0
   )
-  const totalBalance = included.reduce((sum, asset) => sum + asset.currentBalance, 0)
+  const totalBalance = included.reduce(
+    (sum, asset) => sum + asset.currentBalance,
+    0
+  )
   if (totalBalance <= 0) return null
 
   return included.reduce(
     (sum, asset) =>
-      sum + (asset.currentBalance / totalBalance) * (asset.assumedAnnualReturn ?? 0),
-    0,
+      sum +
+      (asset.currentBalance / totalBalance) * (asset.assumedAnnualReturn ?? 0),
+    0
   )
 }
 
@@ -53,7 +60,8 @@ function startOfUtcMonth(d: Date): Date {
 
 function sameUtcMonth(a: Date, b: Date): boolean {
   return (
-    a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth()
+    a.getUTCFullYear() === b.getUTCFullYear() &&
+    a.getUTCMonth() === b.getUTCMonth()
   )
 }
 
@@ -68,7 +76,8 @@ export function monthCountInclusive(start: Date, fi: Date): number {
   const s = startOfUtcMonth(start)
   const e = startOfUtcMonth(fi)
   const diff =
-    (e.getUTCFullYear() - s.getUTCFullYear()) * 12 + (e.getUTCMonth() - s.getUTCMonth())
+    (e.getUTCFullYear() - s.getUTCFullYear()) * 12 +
+    (e.getUTCMonth() - s.getUTCMonth())
   return diff + 1
 }
 
@@ -78,7 +87,9 @@ function formatMonthLabel(d: Date): string {
 }
 
 /**
- * End-of-month projection: compound growth, then capital maturation, then contributions.
+ * End-of-month projection: annual growth, then dated revaluation, then contributions.
+ *
+ * Internal values still use `compound` / `capital` for storage compatibility.
  */
 export function projectPortfolio(input: ProjectionInput): ProjectionResult {
   const { startDate, fiDate, monthlyInvestable, assets, allocations } = input
@@ -86,7 +97,9 @@ export function projectPortfolio(input: ProjectionInput): ProjectionResult {
   const fiMonthStart = startOfUtcMonth(fiDate)
   const n = monthCountInclusive(monthStart, fiMonthStart)
 
-  const weights = new Map(allocations.map((a) => [a.assetId, a.weightPercent / 100]))
+  const weights = new Map(
+    allocations.map((a) => [a.assetId, a.weightPercent / 100])
+  )
   const balances = new Map<string, number>()
   for (const a of assets) {
     balances.set(a.id, a.currentBalance)
@@ -98,7 +111,9 @@ export function projectPortfolio(input: ProjectionInput): ProjectionResult {
   if (n <= 0) {
     const total = sumBalances()
     return {
-      points: [{ label: formatMonthLabel(fiMonthStart), projectedTotal: total }],
+      points: [
+        { label: formatMonthLabel(fiMonthStart), projectedTotal: total },
+      ],
       finalProjectedTotal: total,
     }
   }
@@ -139,12 +154,18 @@ export function projectPortfolio(input: ProjectionInput): ProjectionResult {
   return { points, finalProjectedTotal }
 }
 
-export function isGoalFundable(projectedAtFi: number, required: number): boolean {
+export function isGoalFundable(
+  projectedAtFi: number,
+  required: number
+): boolean {
   if (!Number.isFinite(required) || required <= 0) return false
   return projectedAtFi >= required - 0.5
 }
 
-export function fundingShortfall(projectedAtFi: number, required: number): number {
+export function fundingShortfall(
+  projectedAtFi: number,
+  required: number
+): number {
   return Math.max(0, required - projectedAtFi)
 }
 
@@ -152,7 +173,8 @@ export function monthsFromTodayToFi(today: Date, fiDate: Date): number | null {
   const t = startOfUtcMonth(today)
   const f = startOfUtcMonth(fiDate)
   const diff =
-    (f.getUTCFullYear() - t.getUTCFullYear()) * 12 + (f.getUTCMonth() - t.getUTCMonth())
+    (f.getUTCFullYear() - t.getUTCFullYear()) * 12 +
+    (f.getUTCMonth() - t.getUTCMonth())
   if (diff < 0) return 0
   return diff
 }
@@ -172,7 +194,11 @@ export function toEngineAsset(row: {
     assumedAnnualReturn:
       row.assumedAnnualReturn != null ? Number(row.assumedAnnualReturn) : null,
     assumedTerminalValue:
-      row.assumedTerminalValue != null ? Number(row.assumedTerminalValue) : null,
-    maturationDate: row.maturationDate ? new Date(`${row.maturationDate}T12:00:00Z`) : null,
+      row.assumedTerminalValue != null
+        ? Number(row.assumedTerminalValue)
+        : null,
+    maturationDate: row.maturationDate
+      ? new Date(`${row.maturationDate}T12:00:00Z`)
+      : null,
   }
 }

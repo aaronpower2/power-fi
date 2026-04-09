@@ -15,7 +15,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
+import { PercentInput } from "@/components/ui/numeric-input"
 import {
   Table,
   TableBody,
@@ -169,15 +169,13 @@ export function AllocateInvestableCapitalCta({
                           <div className="text-muted-foreground text-xs">{t.currency}</div>
                         </TableCell>
                         <TableCell className="text-right">
-                          <Input
-                            type="number"
+                          <PercentInput
                             min={0}
-                            step={0.1}
                             className="tabular-nums h-8 text-right"
                             value={Number.isFinite(w) ? w : 0}
                             disabled={pending}
-                            onChange={(e) => {
-                              const v = Number.parseFloat(e.target.value)
+                            onValueChange={(value) => {
+                              const v = typeof value === "number" ? value : 0
                               setDraftWeights((prev) => ({
                                 ...prev,
                                 [t.assetId]: Number.isFinite(v) && v >= 0 ? v : 0,
