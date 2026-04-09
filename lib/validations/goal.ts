@@ -9,7 +9,7 @@ const dateStr = z
 
 const optionalPercentInput = z.preprocess(
   (value) => (value === "" || value == null ? null : value),
-  z.coerce.number().min(0, "At least 0%").max(100, "At most 100%").nullable(),
+  z.coerce.number().min(0, "At least 0%").max(100, "At most 100%").nullable()
 )
 
 export const lifestyleLineInputSchema = z.object({
@@ -39,11 +39,13 @@ export const updateGoalSchema = goalInputSchema.extend({
   id: z.string().uuid(),
 })
 
-export function sumLifestyleMonthly(lines: { monthlyAmount: number }[]): number {
+export function sumLifestyleMonthly(
+  lines: { monthlyAmount: number }[]
+): number {
   return lines.reduce((s, l) => s + l.monthlyAmount, 0)
 }
 
 export type LifestyleLineInput = z.infer<typeof lifestyleLineInputSchema>
-export type GoalInput = z.input<typeof goalInputSchema>
-export type CreateGoalInput = z.input<typeof createGoalSchema>
-export type UpdateGoalInput = z.input<typeof updateGoalSchema>
+export type GoalInput = z.infer<typeof goalInputSchema>
+export type CreateGoalInput = z.infer<typeof createGoalSchema>
+export type UpdateGoalInput = z.infer<typeof updateGoalSchema>
